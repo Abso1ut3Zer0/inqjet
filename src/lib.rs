@@ -10,7 +10,6 @@ use log::LevelFilter;
 
 use crate::{
     logger::{Appender, Logger},
-    notifier::EventNotifier,
     rb::RingBuffer,
 };
 
@@ -19,15 +18,19 @@ pub(crate) mod notifier;
 pub(crate) mod rb;
 pub(crate) mod writer;
 
+pub use notifier::{
+    EventAwaiter, EventNotifier, OsEventAwaiter, OsEventNotifier, SpinEventAwaiter,
+};
+
 const DEFAULT_CAPACITY: usize = 256;
 
-pub struct InqJetGuard {
+pub struct InqJetGuard<E: EventNotifier> {
     handle: Option<std::thread::JoinHandle<()>>,
     flag: Arc<AtomicBool>,
-    notifier: Arc<EventNotifier>,
+    notifier: Arc<E>,
 }
 
-impl Drop for InqJetGuard {
+impl<E: EventNotifier> Drop for InqJetGuard<E> {
     fn drop(&mut self) {
         self.flag.store(false, Ordering::Release);
         self.notifier.notify(); // tell background thread to wakeup
@@ -47,38 +50,62 @@ pub enum InqJetBuilderError {
     IoError(#[from] io::Error),
     #[error("{0}")]
     SetLoggerError(#[from] log::SetLoggerError),
+    #[error("no configured awaiter strategy")]
+    NoConfigeredAwaiter,
 }
 
-pub struct InqJetBuilder<W: io::Write, const N: usize = 512> {
+pub struct InqJetBuilder<W, A, const N: usize = 512> {
     wr: Option<W>,
     level: Option<LevelFilter>,
+    awaiter: Option<A>,
     cap: Option<usize>,
 }
 
-impl<W: io::Write + Send + 'static> InqJetBuilder<W, 512> {
+impl<W, E, A> InqJetBuilder<W, A, 512>
+where
+    W: io::Write + Send + 'static,
+    E: EventNotifier + Sync + Send + 'static,
+    A: EventAwaiter<Notifier = E> + Send + 'static,
+{
     pub fn with_normal_slots() -> Self {
-        InqJetBuilder::<_, 512>::with_custom_slots()
+        InqJetBuilder::<_, _, 512>::with_custom_slots()
     }
 }
 
-impl<W: io::Write + Send + 'static> InqJetBuilder<W, 256> {
+impl<W, E, A> InqJetBuilder<W, A, 256>
+where
+    W: io::Write + Send + 'static,
+    E: EventNotifier + Send + Sync + 'static,
+    A: EventAwaiter<Notifier = E> + Send + 'static,
+{
     pub fn with_small_slots() -> Self {
-        InqJetBuilder::<_, 256>::with_custom_slots()
+        InqJetBuilder::<_, _, 256>::with_custom_slots()
     }
 }
 
-impl<W: io::Write + Send + 'static> InqJetBuilder<W, 1024> {
+impl<W, E, A> InqJetBuilder<W, A, 1024>
+where
+    W: io::Write + Send + 'static,
+    E: EventNotifier + Send + Sync + 'static,
+    A: EventAwaiter<Notifier = E> + Send + 'static,
+{
     pub fn with_large_slots() -> Self {
-        InqJetBuilder::<_, 1024>::with_custom_slots()
+        InqJetBuilder::<_, _, 1024>::with_custom_slots()
     }
 }
 
-impl<W: io::Write + Send + 'static, const N: usize> InqJetBuilder<W, N> {
+impl<W, E, A, const N: usize> InqJetBuilder<W, A, N>
+where
+    W: io::Write + Send + 'static,
+    E: EventNotifier + Send + Sync + 'static,
+    A: EventAwaiter<Notifier = E> + Send + 'static,
+{
     pub fn with_custom_slots() -> Self {
         // Have to configure via type generic yourself!
         Self {
             wr: None,
             level: None,
+            awaiter: None,
             cap: None,
         }
     }
@@ -98,12 +125,20 @@ impl<W: io::Write + Send + 'static, const N: usize> InqJetBuilder<W, N> {
         self
     }
 
-    pub fn build(self) -> Result<InqJetGuard, InqJetBuilderError> {
+    pub fn with_awaiter(mut self, awaiter: A) -> Self {
+        self.awaiter = Some(awaiter);
+        self
+    }
+
+    pub fn build(self) -> Result<InqJetGuard<A::Notifier>, InqJetBuilderError> {
         let capacity = self.cap.unwrap_or(DEFAULT_CAPACITY);
         let writer = self.wr.ok_or(InqJetBuilderError::NoConfiguredWriter)?;
         let level = self.level.ok_or(InqJetBuilderError::NoConfiguredLogLevel)?;
+        let awaiter = self
+            .awaiter
+            .ok_or(InqJetBuilderError::NoConfigeredAwaiter)?;
 
-        let (rb, cons) = RingBuffer::<N>::new(capacity)?;
+        let (rb, cons) = RingBuffer::<N, A::Notifier>::new(awaiter, capacity)?;
         let notifier = rb.notifier();
         let logger = Logger::new(rb);
         let mut appender = Appender::new(cons, writer);
@@ -134,14 +169,18 @@ mod tests {
     use tracing_log::LogTracer;
     use tracing_subscriber::fmt;
 
+    use crate::notifier::OsEventAwaiter;
+
     use super::*;
 
-    #[ignore]
+    // #[ignore]
     #[test]
-    fn test_inqjet_logger() {
+    fn bench_inqjet_eventfd() {
+        let awaiter = OsEventAwaiter::new().unwrap();
         let _guard = InqJetBuilder::with_normal_slots()
             .with_writer(io::stdout())
             .with_log_level(LevelFilter::Info)
+            .with_awaiter(awaiter)
             .build()
             .unwrap();
 
@@ -157,12 +196,38 @@ mod tests {
         }
 
         let total = std::time::Duration::from_nanos(total as u64);
-        println!("InqJet total performance: {:?}", total);
+        println!("InqJet (EventFD) total performance: {:?}", total);
     }
 
-    #[ignore]
+    // #[ignore]
     #[test]
-    fn test_tracing_logger() {
+    fn bench_inqjet_spin() {
+        let awaiter = SpinEventAwaiter::new();
+        let _guard = InqJetBuilder::with_normal_slots()
+            .with_writer(io::stdout())
+            .with_log_level(LevelFilter::Info)
+            .with_awaiter(awaiter)
+            .build()
+            .unwrap();
+
+        let n = 1_000;
+        let duration = std::time::Duration::from_millis(5);
+        let mut total = 0;
+        for i in 0..n {
+            std::thread::sleep(duration);
+            let now = std::time::Instant::now();
+            log::info!("logging to inqjet logger! msg number: {}", i);
+            let elapsed = now.elapsed();
+            total += elapsed.as_nanos();
+        }
+
+        let total = std::time::Duration::from_nanos(total as u64);
+        println!("InqJet (Spin) total performance: {:?}", total);
+    }
+
+    // #[ignore]
+    #[test]
+    fn bench_tracing() {
         LogTracer::init().unwrap();
         let builder = tracing_appender::non_blocking::NonBlockingBuilder::default()
             .buffered_lines_limit(262_144);

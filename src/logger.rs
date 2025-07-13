@@ -1,6 +1,7 @@
 use std::io::{self, Write};
 
 use crate::{
+    notifier::{EventAwaiter, EventNotifier},
     rb::{RingBuffer, RingConsumer},
     writer::LogWriter,
 };
@@ -9,17 +10,17 @@ const ISO8601_FMT: &[time::format_description::FormatItem<'static>] = time::macr
     "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z"
 );
 
-pub struct Logger<const N: usize> {
-    rb: RingBuffer<N>,
+pub struct Logger<const N: usize, E: EventNotifier + Sync + Send + 'static> {
+    rb: RingBuffer<N, E>,
 }
 
-impl<const N: usize> Logger<N> {
-    pub(crate) fn new(rb: RingBuffer<N>) -> Self {
+impl<const N: usize, E: EventNotifier + Send + Sync + 'static> Logger<N, E> {
+    pub(crate) fn new(rb: RingBuffer<N, E>) -> Self {
         Self { rb }
     }
 }
 
-impl<const N: usize> log::Log for Logger<N> {
+impl<const N: usize, E: EventNotifier + Send + Sync + 'static> log::Log for Logger<N, E> {
     fn enabled(&self, _: &log::Metadata) -> bool {
         true
     }
@@ -62,13 +63,13 @@ impl<const N: usize> log::Log for Logger<N> {
     }
 }
 
-pub struct Appender<const N: usize, W: io::Write> {
-    cons: RingConsumer<N>,
+pub struct Appender<const N: usize, W: io::Write, A: EventAwaiter> {
+    cons: RingConsumer<N, A>,
     wr: W,
 }
 
-impl<const N: usize, W: io::Write> Appender<N, W> {
-    pub(crate) fn new(cons: RingConsumer<N>, wr: W) -> Self {
+impl<const N: usize, W: io::Write, A: EventAwaiter> Appender<N, W, A> {
+    pub(crate) fn new(cons: RingConsumer<N, A>, wr: W) -> Self {
         Self { cons, wr }
     }
 
@@ -94,13 +95,17 @@ impl<const N: usize, W: io::Write> Appender<N, W> {
 
 #[cfg(test)]
 mod tests {
+    use crate::notifier::OsEventAwaiter;
+
     use super::*;
     use log::{Level, Log, Record};
 
     #[test]
     fn test_logger_appender_integration() {
         // Create ring buffer and logger
-        let (rb, consumer) = RingBuffer::<512>::new(10).expect("failed to create ring buffer");
+        let awaiter = OsEventAwaiter::new().unwrap();
+        let (rb, consumer) =
+            RingBuffer::<512, _>::new(awaiter, 10).expect("failed to create buffer");
         let logger = Logger::new(rb);
 
         // Create appender with a Vec as writer (for testing)
@@ -136,8 +141,10 @@ mod tests {
     #[test]
     fn test_message_truncation() {
         // Small buffer size to test truncation
-        let (rb, consumer) = RingBuffer::<128>::new(10).expect("failed to create ring buffer");
-        let logger = Logger::<128>::new(rb);
+        let awaiter = OsEventAwaiter::new().unwrap();
+        let (rb, consumer) =
+            RingBuffer::<128, _>::new(awaiter, 10).expect("failed to create buffer");
+        let logger = Logger::new(rb);
         let mut appender = Appender::new(consumer, Vec::new());
 
         // Log a very long message
