@@ -105,10 +105,11 @@ impl<W: io::Write + Send + 'static, const N: usize> InqJetBuilder<W, N> {
 
         let (rb, cons) = RingBuffer::<N>::new(capacity)?;
         let notifier = rb.notifier();
-        let logger = Logger::new(rb, level);
+        let logger = Logger::new(rb);
         let mut appender = Appender::new(cons, writer);
         let flag = Arc::new(AtomicBool::new(true));
         log::set_boxed_logger(Box::new(logger))?;
+        log::set_max_level(level);
 
         let running = flag.clone();
         let handle = std::thread::spawn(move || {
