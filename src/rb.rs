@@ -5,7 +5,7 @@ use std::{io, sync::Arc};
 use crate::notifier::{EventAwaiter, EventNotifier};
 
 #[derive(Clone)]
-pub struct RingBuffer<const N: usize = 512> {
+pub struct RingBuffer<const N: usize> {
     inner: Arc<ArrayQueue<[u8; N]>>,
     notifier: Arc<EventNotifier>,
 }
@@ -16,7 +16,7 @@ pub struct RingConsumer<const N: usize> {
 }
 
 impl<const N: usize> RingBuffer<N> {
-    pub fn new(capacity: usize) -> io::Result<(Self, RingConsumer<N>)> {
+    pub(crate) fn new(capacity: usize) -> io::Result<(Self, RingConsumer<N>)> {
         assert!(N >= 128, "log slots must be at least 128 bytes");
         let queue = Arc::new(ArrayQueue::new(capacity));
         let (awaiter, notifier) = EventAwaiter::new()?;
@@ -32,7 +32,11 @@ impl<const N: usize> RingBuffer<N> {
         ))
     }
 
-    pub fn publish(&self, mut log: [u8; N]) {
+    pub(crate) fn notifier(&self) -> Arc<EventNotifier> {
+        self.notifier.clone()
+    }
+
+    pub(crate) fn publish(&self, mut log: [u8; N]) {
         let backoff = Backoff::new();
         while let Err(returned_log) = self.inner.push(log) {
             log = returned_log;
@@ -44,7 +48,7 @@ impl<const N: usize> RingBuffer<N> {
 }
 
 impl<const N: usize> RingConsumer<N> {
-    pub fn receive(&mut self, timeout: Option<std::time::Duration>) -> io::Result<Option<[u8; N]>> {
+    pub(crate) fn receive(&mut self, timeout: Option<std::time::Duration>) -> io::Result<Option<[u8; N]>> {
         if let Some(msg) = self.inner.pop() {
             return Ok(Some(msg));
         }

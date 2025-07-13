@@ -93,6 +93,10 @@ impl<const N: usize, W: io::Write> Appender<N, W> {
             Err(err) => Err(err),
         }
     }
+
+    pub(crate) fn flush(&mut self) -> io::Result<()> {
+        self.wr.flush()
+    }
 }
 
 #[cfg(test)]
