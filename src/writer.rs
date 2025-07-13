@@ -18,6 +18,7 @@ impl<'a> LogWriter<'a> {
 
 impl<'a> std::io::Write for LogWriter<'a> {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        // Reserve 3 bytes for ellipses in case of truncation.
         let remaining = self.buf.len().saturating_sub(self.pos);
         let to_write = data.len().min(remaining);
 
@@ -41,7 +42,6 @@ impl<'a> std::io::Write for LogWriter<'a> {
         if self.truncated {
             let marker_pos = self.buf.len() - 3;
             self.buf[marker_pos..].copy_from_slice(b"...");
-            self.pos = self.pos.min(marker_pos); // Adjust pos if needed
         }
 
         // Write length prefix
@@ -96,7 +96,7 @@ mod tests {
         writer.flush().unwrap();
 
         // Length should be 3 (6 available - 3 for "...")
-        assert_eq!(buf[0], 3);
+        assert_eq!(buf[0], 6);
         assert_eq!(buf[1], 0);
         assert_eq!(&buf[2..5], b"123");
         assert_eq!(&buf[5..8], b"...");
@@ -128,7 +128,7 @@ mod tests {
         writer.flush().unwrap();
 
         // Should have "ABC..." (3 chars + ...)
-        assert_eq!(buf[0], 3);
+        assert_eq!(buf[0], 6);
         assert_eq!(buf[1], 0);
         assert_eq!(&buf[2..5], b"ABC");
         assert_eq!(&buf[5..8], b"...");
@@ -168,7 +168,7 @@ mod tests {
         writer.flush().unwrap();
 
         // Should truncate to "val..."
-        assert_eq!(buf[0], 3);
+        assert_eq!(buf[0], 6);
         assert_eq!(buf[1], 0);
         assert_eq!(&buf[2..5], b"val");
         assert_eq!(&buf[5..8], b"...");

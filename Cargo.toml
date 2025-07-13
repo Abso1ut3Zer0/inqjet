@@ -4,4 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+crossbeam-queue = "0.3.12"
+crossbeam-utils = "0.8.21"
+log = { version = "0.4.27", features = ["std"] }
 mio = { version = "1.0.4", features = ["os-poll"] }
+time = { version = "0.3.41", features = ["formatting", "macros"] }

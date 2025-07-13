@@ -1,3 +1,4 @@
-mod writer;
-mod rb;
-mod notifier;
+mod logger;
+pub(crate) mod notifier;
+pub(crate) mod rb;
+pub(crate) mod writer;
