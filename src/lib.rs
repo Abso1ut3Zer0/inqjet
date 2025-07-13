@@ -173,7 +173,7 @@ mod tests {
 
     use super::*;
 
-    // #[ignore]
+    #[ignore]
     #[test]
     fn bench_inqjet_eventfd() {
         let awaiter = OsEventAwaiter::new().unwrap();
@@ -199,7 +199,7 @@ mod tests {
         println!("InqJet (EventFD) total performance: {:?}", total);
     }
 
-    // #[ignore]
+    #[ignore]
     #[test]
     fn bench_inqjet_spin() {
         let awaiter = SpinEventAwaiter::new();
@@ -225,7 +225,7 @@ mod tests {
         println!("InqJet (Spin) total performance: {:?}", total);
     }
 
-    // #[ignore]
+    #[ignore]
     #[test]
     fn bench_tracing() {
         LogTracer::init().unwrap();
