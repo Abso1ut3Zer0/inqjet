@@ -36,14 +36,29 @@ impl<const N: usize> log::Log for Logger<N> {
         let mut wr = LogWriter::new(&mut buf);
         let now = time::OffsetDateTime::now_utc();
         now.format_into(&mut wr, &ISO8601_FMT).ok();
-        write!(
-            &mut wr,
-            " [{}] {}: {}",
-            record.level(),
-            record.target(),
-            record.args()
-        )
-        .ok();
+        match record.line() {
+            Some(line) => {
+                write!(
+                    &mut wr,
+                    " [{}] {}:{} - {}",
+                    record.level(),
+                    record.target(),
+                    line,
+                    record.args()
+                )
+                .ok();
+            }
+            None => {
+                write!(
+                    &mut wr,
+                    " [{}] {} - {}",
+                    record.level(),
+                    record.target(),
+                    record.args()
+                )
+                .ok();
+            }
+        }
 
         wr.flush().ok();
         self.rb.publish(buf);
@@ -101,6 +116,7 @@ mod tests {
                 .args(format_args!("Test message"))
                 .level(Level::Info)
                 .target("test_module")
+                .line(Some(23))
                 .build(),
         );
 
@@ -113,7 +129,7 @@ mod tests {
         println!("Output: {}", output_str);
 
         // Should contain our message
-        assert!(output_str.contains("[INFO] test_module: Test message"));
+        assert!(output_str.contains("[INFO] test_module:23 - Test message"));
         assert!(output_str.ends_with("\n"));
 
         // Should have timestamp at the beginning
@@ -132,6 +148,7 @@ mod tests {
                 .args(format_args!("Debug message"))
                 .level(Level::Debug)
                 .target("test")
+                .line(Some(23))
                 .build(),
         );
 
@@ -147,6 +164,7 @@ mod tests {
                 .args(format_args!("Error message"))
                 .level(Level::Error)
                 .target("test")
+                .line(Some(23))
                 .build(),
         );
 
@@ -173,6 +191,7 @@ mod tests {
                 .args(format_args!("{}", long_msg))
                 .level(Level::Info)
                 .target("test")
+                .line(Some(23))
                 .build(),
         );
 
