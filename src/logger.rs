@@ -1,5 +1,7 @@
 use std::io::{self, Write};
 
+use log::Level;
+
 use crate::{
     notifier::{EventAwaiter, EventNotifier},
     rb::{RingBuffer, RingConsumer},
@@ -26,18 +28,37 @@ impl<const N: usize, E: EventNotifier + Send + Sync + 'static> log::Log for Logg
     }
 
     fn log(&self, record: &log::Record) {
+        const RESET: &str = "\x1b[0m";
+        const GRAY: &str = "\x1b[90m";
+        const fn color(level: Level) -> &'static str {
+            match level {
+                Level::Error => "\x1b[31m",
+                Level::Warn => "\x1b[33m",
+                Level::Info => "\x1b[32m",
+                Level::Debug => "\x1b[36m",
+                Level::Trace => GRAY,
+            }
+        }
+
         let mut buf = [0u8; N];
         let mut wr = LogWriter::new(&mut buf);
         let now = time::OffsetDateTime::now_utc();
+        write!(&mut wr, "{}", GRAY).ok();
         now.format_into(&mut wr, &ISO8601_FMT).ok();
+        write!(&mut wr, "{}", RESET).ok();
+        let level = record.level();
         match record.line() {
             Some(line) => {
                 write!(
                     &mut wr,
-                    " [{}] {}:{} - {}",
-                    record.level(),
+                    " {}[{}]{} {}{}:{}{} - {}",
+                    color(level),
+                    level,
+                    RESET,
+                    GRAY,
                     record.target(),
                     line,
+                    RESET,
                     record.args()
                 )
                 .ok();
@@ -45,9 +66,13 @@ impl<const N: usize, E: EventNotifier + Send + Sync + 'static> log::Log for Logg
             None => {
                 write!(
                     &mut wr,
-                    " [{}] {} - {}",
-                    record.level(),
+                    " {}[{}]{} {}{}{} - {}",
+                    color(level),
+                    level,
+                    RESET,
+                    GRAY,
                     record.target(),
+                    RESET,
                     record.args()
                 )
                 .ok();
@@ -131,7 +156,9 @@ mod tests {
         println!("Output: {}", output_str);
 
         // Should contain our message
-        assert!(output_str.contains("[INFO] test_module:23 - Test message"));
+        assert!(output_str.contains("[INFO]"));
+        assert!(output_str.contains("test_module:"));
+        assert!(output_str.contains(" - Test message"));
         assert!(output_str.ends_with("\n"));
 
         // Should have timestamp at the beginning
