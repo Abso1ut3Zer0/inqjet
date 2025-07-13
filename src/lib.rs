@@ -130,23 +130,61 @@ impl<W: io::Write + Send + 'static, const N: usize> InqJetBuilder<W, N> {
 
 #[cfg(test)]
 mod tests {
-    use std::io::BufWriter;
+    use tracing::Level;
+    use tracing_log::LogTracer;
+    use tracing_subscriber::fmt;
 
     use super::*;
 
+    #[ignore]
     #[test]
     fn test_inqjet_logger() {
-        let stdout = io::stdout();
-        let writer = BufWriter::new(stdout);
         let _guard = InqJetBuilder::with_normal_slots()
-            .with_writer(writer)
+            .with_writer(io::stdout())
             .with_log_level(LevelFilter::Info)
             .build()
             .unwrap();
 
-        for i in 0..10 {
-            std::thread::sleep(std::time::Duration::from_secs(1));
+        let n = 1_000;
+        let duration = std::time::Duration::from_millis(5);
+        let mut total = 0;
+        for i in 0..n {
+            std::thread::sleep(duration);
+            let now = std::time::Instant::now();
             log::info!("logging to inqjet logger! msg number: {}", i);
+            let elapsed = now.elapsed();
+            total += elapsed.as_nanos();
         }
+
+        let total = std::time::Duration::from_nanos(total as u64);
+        println!("InqJet total performance: {:?}", total);
+    }
+
+    #[ignore]
+    #[test]
+    fn test_tracing_logger() {
+        LogTracer::init().unwrap();
+        let builder = tracing_appender::non_blocking::NonBlockingBuilder::default()
+            .buffered_lines_limit(262_144);
+        let (writer, _guard) = builder.finish(io::stdout());
+        let subscriber = fmt::Subscriber::builder()
+            .with_writer(writer)
+            .with_max_level(Level::INFO)
+            .finish();
+        tracing::subscriber::set_global_default(subscriber).unwrap();
+
+        let n = 1_000;
+        let duration = std::time::Duration::from_millis(5);
+        let mut total = 0;
+        for i in 0..n {
+            std::thread::sleep(duration);
+            let now = std::time::Instant::now();
+            log::info!("logging to tracing logger! msg number: {}", i);
+            let elapsed = now.elapsed();
+            total += elapsed.as_nanos();
+        }
+
+        let total = std::time::Duration::from_nanos(total as u64);
+        println!("Tracing total performance: {:?}", total);
     }
 }

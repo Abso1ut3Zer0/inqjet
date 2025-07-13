@@ -43,7 +43,10 @@ impl<const N: usize> RingBuffer<N> {
             backoff.snooze();
         }
 
+        let now = std::time::Instant::now();
         self.notifier.notify();
+        let elapsed = now.elapsed();
+        println!("elapsed time notify: {:?}", elapsed);
     }
 }
 
