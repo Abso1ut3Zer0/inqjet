@@ -1,15 +1,16 @@
 use std::{
+    fmt::Display,
     io,
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicBool, Ordering},
     },
 };
 
-use log::LevelFilter;
+use derive_builder::Builder;
 
 use crate::{
-    logger::{Appender, Logger},
+    logger::{Appender, FmtLogger},
     rb::RingBuffer,
 };
 
@@ -19,8 +20,85 @@ pub(crate) mod rb;
 pub(crate) mod writer;
 
 pub use notifier::{EventAwaiter, EventNotifier};
+pub use writer::{CtxWriter, format_ctx};
 
 const DEFAULT_CAPACITY: usize = 256;
+static LOGGER: OnceLock<Box<dyn Logger + Send + Sync + 'static>> = OnceLock::new();
+
+/// An enum representing the available verbosity levels of the logger.
+#[repr(usize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Hash)]
+pub enum Level {
+    /// The "error" level.
+    ///
+    /// Designates very serious errors.
+    // This way these line up with the discriminants for LevelFilter below
+    // This works because Rust treats field-less enums the same way as C does:
+    // https://doc.rust-lang.org/reference/items/enumerations.html#custom-discriminant-values-for-field-less-enumerations
+    Error = 1,
+    /// The "warn" level.
+    ///
+    /// Designates hazardous situations.
+    Warn,
+    /// The "info" level.
+    ///
+    /// Designates useful information.
+    Info,
+    /// The "debug" level.
+    ///
+    /// Designates lower priority information.
+    Debug,
+    /// The "trace" level.
+    ///
+    /// Designates very low priority, often extremely verbose, information.
+    Trace,
+}
+
+impl Display for Level {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Level::Error => "ERROR".fmt(f),
+            Level::Warn => "WARN".fmt(f),
+            Level::Info => "INFO".fmt(f),
+            Level::Debug => "DEBUG".fmt(f),
+            Level::Trace => "TRACE".fmt(f),
+        }
+    }
+}
+
+#[derive(Debug, Builder)]
+pub struct LogRecord<'a> {
+    level: Level,
+    path: &'static str,
+    line: u32,
+    msg: &'static str,
+    args: std::fmt::Arguments<'a>,
+}
+
+#[derive(Debug, Builder)]
+pub struct FmtRecord<const N: usize> {
+    level: Level,
+    path: &'static str,
+    line: u32,
+    msg: &'static str,
+    ctx: [u8; N],
+}
+
+impl<const N: usize> From<LogRecord<'_>> for FmtRecord<N> {
+    fn from(value: LogRecord) -> Self {
+        Self {
+            level: value.level,
+            path: value.path,
+            line: value.line,
+            msg: value.msg,
+            ctx: format_ctx(value.args),
+        }
+    }
+}
+
+pub trait Logger {
+    fn log(&self, record: LogRecord<'_>);
+}
 
 pub struct InqJetGuard {
     handle: Option<std::thread::JoinHandle<()>>,
@@ -46,13 +124,13 @@ pub enum InqJetBuilderError {
     NoConfiguredLogLevel,
     #[error("io error: {0}")]
     IoError(#[from] io::Error),
-    #[error("{0}")]
-    SetLoggerError(#[from] log::SetLoggerError),
+    #[error("logger already set")]
+    LoggerAlreadySet,
 }
 
 pub struct InqJetBuilder<W, const N: usize = 512> {
     wr: Option<W>,
-    level: Option<LevelFilter>,
+    level: Option<Level>,
     cap: Option<usize>,
 }
 
@@ -106,7 +184,7 @@ where
         self
     }
 
-    pub fn with_log_level(mut self, level: LevelFilter) -> Self {
+    pub fn with_log_level(mut self, level: Level) -> Self {
         self.level = Some(level);
         self
     }
@@ -119,11 +197,12 @@ where
 
         let (rb, cons) = RingBuffer::<N>::new(awaiter, capacity)?;
         let notifier = rb.notifier();
-        let logger = Logger::new(rb);
+        let logger = FmtLogger::new(rb, level);
         let mut appender = Appender::new(cons, writer);
         let flag = Arc::new(AtomicBool::new(true));
-        log::set_boxed_logger(Box::new(logger))?;
-        log::set_max_level(level);
+        LOGGER
+            .set(Box::new(logger))
+            .map_err(|_| InqJetBuilderError::LoggerAlreadySet)?;
 
         let running = flag.clone();
         let handle = std::thread::spawn(move || {
@@ -142,6 +221,126 @@ where
     }
 }
 
+#[inline(always)]
+pub fn try_log(record: LogRecord<'_>) {
+    if let Some(logger) = LOGGER.get() {
+        logger.log(record);
+    }
+}
+
+#[macro_export]
+macro_rules! log {
+    ($level:expr, $msg:expr) => {{
+        $crate::try_log($crate::LogRecord {
+            level: $level,
+            path: module_path!(),
+            line: line!(),
+            msg: $msg,
+            args: format_args!(""),
+        });
+    }};
+
+    ($level:expr, $msg:expr, $($arg:tt)*) => {{
+        $crate::try_log($crate::LogRecord {
+            level: $level,
+            path: module_path!(),
+            line: line!(),
+            msg: $msg,
+            args: format_args!($($arg)*),
+        });
+    }};
+
+    ($level:expr, $($arg:tt)*) => {{
+        $crate::try_log($crate::LogRecord {
+            level: $level,
+            path: module_path!(),
+            line: line!(),
+            msg: "",
+            args: format_args!($($arg)*),
+        });
+    }};
+}
+
+#[macro_export]
+macro_rules! info {
+    // Static message only
+    ($msg:literal) => {
+        $crate::log!($crate::Level::Info, $msg)
+    };
+    // Static message + named context
+    ($msg:literal, ctx: $($arg:tt)*) => {
+        $crate::log!($crate::Level::Info, $msg, $($arg)*)
+    };
+    // Everything else - fully dynamic
+    ($($arg:tt)*) => {
+        $crate::log!($crate::Level::Info, $($arg)*)
+    };
+}
+
+#[macro_export]
+macro_rules! warn {
+    // Static message only
+    ($msg:literal) => {
+        $crate::log!($crate::Level::Warn, $msg)
+    };
+    // Static message + named context
+    ($msg:literal, ctx: $($arg:tt)*) => {
+        $crate::log!($crate::Level::Warn, $msg, $($arg)*)
+    };
+    // Everything else - fully dynamic
+    ($($arg:tt)*) => {
+        $crate::log!($crate::Level::Warn, $($arg)*)
+    };
+}
+
+#[macro_export]
+macro_rules! error {
+    // Static message only
+    ($msg:literal) => {
+        $crate::log!($crate::Level::Error, $msg)
+    };
+    // Static message + named context
+    ($msg:literal, ctx: $($arg:tt)*) => {
+        $crate::log!($crate::Level::Error, $msg, $($arg)*)
+    };
+    // Everything else - fully dynamic
+    ($($arg:tt)*) => {
+        $crate::log!($crate::Level::Error, $($arg)*)
+    };
+}
+
+#[macro_export]
+macro_rules! debug {
+    // Static message only
+    ($msg:literal) => {
+        $crate::log!($crate::Level::Debug, $msg)
+    };
+    // Static message + named context
+    ($msg:literal, ctx: $($arg:tt)*) => {
+        $crate::log!($crate::Level::Debug, $msg, $($arg)*)
+    };
+    // Everything else - fully dynamic
+    ($($arg:tt)*) => {
+        $crate::log!($crate::Level::Debug, $($arg)*)
+    };
+}
+
+#[macro_export]
+macro_rules! trace {
+    // Static message only
+    ($msg:literal) => {
+        $crate::log!($crate::Level::Trace, $msg)
+    };
+    // Static message + named context
+    ($msg:literal, ctx: $($arg:tt)*) => {
+        $crate::log!($crate::Level::Trace, $msg, $($arg)*)
+    };
+    // Everything else - fully dynamic
+    ($($arg:tt)*) => {
+        $crate::log!($crate::Level::Trace, $($arg)*)
+    };
+}
+
 #[cfg(test)]
 mod tests {
     use tracing::Level;
@@ -150,12 +349,12 @@ mod tests {
 
     use super::*;
 
-    #[ignore]
+    // #[ignore]
     #[test]
     fn bench_inqjet() {
         let _guard = InqJetBuilder::with_normal_slots()
             .with_writer(io::stdout())
-            .with_log_level(LevelFilter::Info)
+            .with_log_level(crate::Level::Info)
             .build()
             .unwrap();
 
@@ -165,7 +364,8 @@ mod tests {
         for i in 0..n {
             std::thread::sleep(duration);
             let now = std::time::Instant::now();
-            log::info!("logging to inqjet logger! msg number: {}", i);
+            // crate::info!("logging to inqjet logger!", "msg number: {}", i);
+            crate::info!("logging to inqjet logger! msg number: {}");
             let elapsed = now.elapsed();
             total += elapsed.as_nanos();
         }
@@ -174,7 +374,7 @@ mod tests {
         println!("InqJet (EventFD) total performance: {:?}", total);
     }
 
-    #[ignore]
+    // #[ignore]
     #[test]
     fn bench_tracing() {
         LogTracer::init().unwrap();
@@ -193,7 +393,7 @@ mod tests {
         for i in 0..n {
             std::thread::sleep(duration);
             let now = std::time::Instant::now();
-            log::info!("logging to tracing logger! msg number: {}", i);
+            tracing::info!("logging to tracing logger! msg number: {}", i);
             let elapsed = now.elapsed();
             total += elapsed.as_nanos();
         }

@@ -1,12 +1,12 @@
 const LEN_OFFSET: usize = 2;
 
-pub struct LogWriter<'a> {
+pub struct CtxWriter<'a> {
     buf: &'a mut [u8],
     pos: usize,
     truncated: bool,
 }
 
-impl<'a> LogWriter<'a> {
+impl<'a> CtxWriter<'a> {
     pub fn new(buf: &'a mut [u8]) -> Self {
         Self {
             buf,
@@ -16,7 +16,7 @@ impl<'a> LogWriter<'a> {
     }
 }
 
-impl<'a> std::io::Write for LogWriter<'a> {
+impl<'a> std::io::Write for CtxWriter<'a> {
     fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
         // Reserve 3 bytes for ellipses in case of truncation.
         let remaining = self.buf.len().saturating_sub(self.pos);
@@ -52,6 +52,23 @@ impl<'a> std::io::Write for LogWriter<'a> {
     }
 }
 
+pub fn format_ctx<const N: usize>(args: std::fmt::Arguments<'_>) -> [u8; N] {
+    use std::io::Write;
+    let mut buf = [0u8; N];
+    let mut writer = CtxWriter::new(&mut buf);
+    write!(&mut writer, "{}", args).ok();
+    writer.flush().ok();
+    buf
+}
+
+#[macro_export]
+macro_rules! format_ctx {
+    // Base case with explicit buffer
+    ($($arg:tt)*) => {{
+        $crate::format_ctx(format_args!($($arg)*))
+    }};
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -60,7 +77,7 @@ mod tests {
     #[test]
     fn test_basic_write() {
         let mut buf = [0u8; 8];
-        let mut writer = LogWriter::new(&mut buf);
+        let mut writer = CtxWriter::new(&mut buf);
 
         write!(&mut writer, "Hi").unwrap();
         writer.flush().unwrap();
@@ -70,12 +87,18 @@ mod tests {
         assert_eq!(buf[1], 0);
         // Next 2 bytes = "Hi"
         assert_eq!(&buf[2..4], b"Hi");
+
+        let buf: [u8; 8] = format_ctx!("{}", "Hi");
+        assert_eq!(buf[0], 2);
+        assert_eq!(buf[1], 0);
+        // Next 2 bytes = "Hi"
+        assert_eq!(&buf[2..4], b"Hi");
     }
 
     #[test]
     fn test_exact_fit() {
         let mut buf = [0u8; 8];
-        let mut writer = LogWriter::new(&mut buf);
+        let mut writer = CtxWriter::new(&mut buf);
 
         // 6 bytes of data fits exactly (8 - 2 for length)
         write!(&mut writer, "123456").unwrap();
@@ -89,7 +112,7 @@ mod tests {
     #[test]
     fn test_truncation() {
         let mut buf = [0u8; 8];
-        let mut writer = LogWriter::new(&mut buf);
+        let mut writer = CtxWriter::new(&mut buf);
 
         // Try to write 10 bytes - should truncate
         write!(&mut writer, "1234567890").unwrap();
@@ -105,7 +128,7 @@ mod tests {
     #[test]
     fn test_multiple_writes() {
         let mut buf = [0u8; 8];
-        let mut writer = LogWriter::new(&mut buf);
+        let mut writer = CtxWriter::new(&mut buf);
 
         write!(&mut writer, "AB").unwrap();
         write!(&mut writer, "CD").unwrap();
@@ -120,7 +143,7 @@ mod tests {
     #[test]
     fn test_multiple_writes_with_truncation() {
         let mut buf = [0u8; 8];
-        let mut writer = LogWriter::new(&mut buf);
+        let mut writer = CtxWriter::new(&mut buf);
 
         write!(&mut writer, "ABC").unwrap();
         write!(&mut writer, "DEF").unwrap();
@@ -137,7 +160,7 @@ mod tests {
     #[test]
     fn test_empty_write() {
         let mut buf = [0u8; 8];
-        let mut writer = LogWriter::new(&mut buf);
+        let mut writer = CtxWriter::new(&mut buf);
 
         writer.flush().unwrap();
 
@@ -148,7 +171,7 @@ mod tests {
     #[test]
     fn test_format_args() {
         let mut buf = [0u8; 8];
-        let mut writer = LogWriter::new(&mut buf);
+        let mut writer = CtxWriter::new(&mut buf);
 
         let x = 42;
         write!(&mut writer, "x={}", x).unwrap();
@@ -162,7 +185,7 @@ mod tests {
     #[test]
     fn test_format_args_truncated() {
         let mut buf = [0u8; 8];
-        let mut writer = LogWriter::new(&mut buf);
+        let mut writer = CtxWriter::new(&mut buf);
 
         write!(&mut writer, "value={}", 123456789).unwrap();
         writer.flush().unwrap();
