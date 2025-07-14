@@ -4,12 +4,12 @@ use std::{io, sync::Arc};
 
 use crate::notifier::{EventAwaiter, EventNotifier};
 
-pub struct RingBuffer<const N: usize, E: EventNotifier> {
+pub struct RingBuffer<const N: usize> {
     inner: Arc<ArrayQueue<[u8; N]>>,
-    notifier: Arc<E>,
+    notifier: EventNotifier,
 }
 
-impl<const N: usize, E: EventNotifier> Clone for RingBuffer<N, E> {
+impl<const N: usize> Clone for RingBuffer<N> {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -18,11 +18,11 @@ impl<const N: usize, E: EventNotifier> Clone for RingBuffer<N, E> {
     }
 }
 
-impl<const N: usize, E: EventNotifier> RingBuffer<N, E> {
-    pub(crate) fn new<A: EventAwaiter<Notifier = E>>(
-        awaiter: A,
+impl<const N: usize> RingBuffer<N> {
+    pub(crate) fn new(
+        awaiter: EventAwaiter,
         capacity: usize,
-    ) -> io::Result<(Self, RingConsumer<N, A>)> {
+    ) -> io::Result<(Self, RingConsumer<N>)> {
         assert!(N >= 128, "log slots must be at least 128 bytes");
         let queue = Arc::new(ArrayQueue::new(capacity));
         Ok((
@@ -37,7 +37,7 @@ impl<const N: usize, E: EventNotifier> RingBuffer<N, E> {
         ))
     }
 
-    pub(crate) fn notifier(&self) -> Arc<E> {
+    pub(crate) fn notifier(&self) -> EventNotifier {
         self.notifier.clone()
     }
 
@@ -52,12 +52,12 @@ impl<const N: usize, E: EventNotifier> RingBuffer<N, E> {
     }
 }
 
-pub struct RingConsumer<const N: usize, A: EventAwaiter> {
+pub struct RingConsumer<const N: usize> {
     inner: Arc<ArrayQueue<[u8; N]>>,
-    awaiter: A,
+    awaiter: EventAwaiter,
 }
 
-impl<const N: usize, A: EventAwaiter> RingConsumer<N, A> {
+impl<const N: usize> RingConsumer<N> {
     pub(crate) fn receive(
         &mut self,
         timeout: Option<std::time::Duration>,
@@ -74,7 +74,7 @@ impl<const N: usize, A: EventAwaiter> RingConsumer<N, A> {
 
 #[cfg(test)]
 mod tests {
-    use crate::notifier::OsEventAwaiter;
+    use crate::notifier::EventAwaiter;
 
     use super::*;
     use std::sync::{
@@ -87,9 +87,9 @@ mod tests {
     #[test]
     fn test_basic_publish_receive() {
         println!("\n=== Test: Basic Publish/Receive ===");
-        let awaiter = OsEventAwaiter::new().unwrap();
+        let awaiter = EventAwaiter::new().unwrap();
         let (buffer, mut consumer) =
-            RingBuffer::<256, _>::new(awaiter, 4).expect("failed to create buffer");
+            RingBuffer::<256>::new(awaiter, 4).expect("failed to create buffer");
 
         // Publish a message
         let mut msg = [0u8; 256];
@@ -113,9 +113,9 @@ mod tests {
     #[test]
     fn test_event_wakeup_across_threads() {
         println!("\n=== Test: Event Wakeup Across Threads ===");
-        let awaiter = OsEventAwaiter::new().unwrap();
+        let awaiter = EventAwaiter::new().unwrap();
         let (buffer, mut consumer) =
-            RingBuffer::<256, _>::new(awaiter, 4).expect("failed to create buffer");
+            RingBuffer::<256>::new(awaiter, 4).expect("failed to create buffer");
         let counter = Arc::new(AtomicUsize::new(0));
         let running = Arc::new(AtomicBool::new(true));
 
@@ -176,9 +176,9 @@ mod tests {
     #[test]
     fn test_blocking_when_full() {
         println!("\n=== Test: Blocking When Full ===");
-        let awaiter = OsEventAwaiter::new().unwrap();
+        let awaiter = EventAwaiter::new().unwrap();
         let (buffer, mut consumer) =
-            RingBuffer::<256, _>::new(awaiter, 2).expect("failed to create buffer");
+            RingBuffer::<256>::new(awaiter, 2).expect("failed to create buffer");
         let published = Arc::new(AtomicBool::new(false));
         let published_clone = published.clone();
 
@@ -219,9 +219,9 @@ mod tests {
     #[test]
     fn test_multiple_publishers_single_consumer() {
         println!("\n=== Test: Multiple Publishers, Single Consumer ===");
-        let awaiter = OsEventAwaiter::new().unwrap();
+        let awaiter = EventAwaiter::new().unwrap();
         let (buffer, mut consumer) =
-            RingBuffer::<256, _>::new(awaiter, 4).expect("failed to create buffer");
+            RingBuffer::<256>::new(awaiter, 4).expect("failed to create buffer");
         let received = Arc::new(AtomicUsize::new(0));
         let messages_per_thread = 10;
         let num_threads = 3;
@@ -297,7 +297,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "log slots must be at least 128 bytes")]
     fn test_minimum_size_assertion() {
-        let awaiter = OsEventAwaiter::new().unwrap();
-        let _ = RingBuffer::<64, _>::new(awaiter, 10).expect("failed to create buffer");
+        let awaiter = EventAwaiter::new().unwrap();
+        let _ = RingBuffer::<64>::new(awaiter, 10).expect("failed to create buffer");
     }
 }
