@@ -4,12 +4,12 @@ use std::{io, sync::Arc};
 
 use crate::notifier::{EventAwaiter, EventNotifier};
 
-pub struct RingBuffer<const N: usize> {
-    inner: Arc<ArrayQueue<[u8; N]>>,
+pub struct RingBuffer {
+    inner: Arc<ArrayQueue<String>>,
     notifier: EventNotifier,
 }
 
-impl<const N: usize> Clone for RingBuffer<N> {
+impl Clone for RingBuffer {
     fn clone(&self) -> Self {
         Self {
             inner: self.inner.clone(),
@@ -18,12 +18,8 @@ impl<const N: usize> Clone for RingBuffer<N> {
     }
 }
 
-impl<const N: usize> RingBuffer<N> {
-    pub(crate) fn new(
-        awaiter: EventAwaiter,
-        capacity: usize,
-    ) -> io::Result<(Self, RingConsumer<N>)> {
-        assert!(N >= 128, "log slots must be at least 128 bytes");
+impl RingBuffer {
+    pub(crate) fn new(awaiter: EventAwaiter, capacity: usize) -> io::Result<(Self, RingConsumer)> {
         let queue = Arc::new(ArrayQueue::new(capacity));
         Ok((
             Self {
@@ -41,7 +37,7 @@ impl<const N: usize> RingBuffer<N> {
         self.notifier.clone()
     }
 
-    pub(crate) fn publish(&self, mut log: [u8; N]) {
+    pub(crate) fn publish(&self, mut log: String) {
         let backoff = Backoff::new();
         while let Err(returned_log) = self.inner.push(log) {
             log = returned_log;
@@ -52,16 +48,16 @@ impl<const N: usize> RingBuffer<N> {
     }
 }
 
-pub struct RingConsumer<const N: usize> {
-    inner: Arc<ArrayQueue<[u8; N]>>,
+pub struct RingConsumer {
+    inner: Arc<ArrayQueue<String>>,
     awaiter: EventAwaiter,
 }
 
-impl<const N: usize> RingConsumer<N> {
+impl RingConsumer {
     pub(crate) fn receive(
         &mut self,
         timeout: Option<std::time::Duration>,
-    ) -> io::Result<Option<[u8; N]>> {
+    ) -> io::Result<Option<String>> {
         if let Some(msg) = self.inner.pop() {
             return Ok(Some(msg));
         }
@@ -88,12 +84,10 @@ mod tests {
     fn test_basic_publish_receive() {
         println!("\n=== Test: Basic Publish/Receive ===");
         let awaiter = EventAwaiter::new().unwrap();
-        let (buffer, mut consumer) =
-            RingBuffer::<256>::new(awaiter, 4).expect("failed to create buffer");
+        let (buffer, mut consumer) = RingBuffer::new(awaiter, 4).expect("failed to create buffer");
 
         // Publish a message
-        let mut msg = [0u8; 256];
-        msg[..5].copy_from_slice(b"hello");
+        let msg = "hello".to_string();
         println!("Publishing message: 'hello'");
         buffer.publish(msg);
 
@@ -102,11 +96,8 @@ mod tests {
             .receive(None)
             .expect("receive failed")
             .expect("should have message");
-        println!(
-            "Received message: '{}'",
-            std::str::from_utf8(&received[..5]).unwrap()
-        );
-        assert_eq!(&received[..5], b"hello");
+        println!("Received message: '{}'", received,);
+        assert_eq!(received.as_str(), "hello");
         println!("✓ Test passed\n");
     }
 
@@ -114,8 +105,7 @@ mod tests {
     fn test_event_wakeup_across_threads() {
         println!("\n=== Test: Event Wakeup Across Threads ===");
         let awaiter = EventAwaiter::new().unwrap();
-        let (buffer, mut consumer) =
-            RingBuffer::<256>::new(awaiter, 4).expect("failed to create buffer");
+        let (buffer, mut consumer) = RingBuffer::new(awaiter, 4).expect("failed to create buffer");
         let counter = Arc::new(AtomicUsize::new(0));
         let running = Arc::new(AtomicBool::new(true));
 
@@ -129,16 +119,13 @@ mod tests {
                 match consumer.receive(Some(Duration::from_millis(100))) {
                     Ok(Some(msg)) => {
                         let count = counter_clone.fetch_add(1, Ordering::Release) + 1;
-                        println!(
-                            "[Consumer] Received message #{} with value: {}",
-                            count, msg[0]
-                        );
+                        println!("[Consumer] Received message #{} with value: {}", count, msg);
                     }
                     Ok(None) => {
                         println!("[Consumer] Timeout waiting for message");
                     }
                     Err(e) => {
-                        println!("[Consumer] Error: {:?}", e);
+                        println!("[Cosumer] Error: {:?}", e);
                         break;
                     }
                 }
@@ -150,9 +137,8 @@ mod tests {
         thread::sleep(Duration::from_millis(100)); // Let consumer start
 
         for i in 0..5 {
-            let mut msg = [0u8; 256];
-            msg[0] = i + 1;
-            println!("[Publisher] Publishing message with value: {}", msg[0]);
+            let msg = format!("{}", i + 1);
+            println!("[Publisher] Publishing message with value: {}", msg);
             buffer.publish(msg);
             thread::sleep(Duration::from_millis(50));
         }
@@ -177,22 +163,21 @@ mod tests {
     fn test_blocking_when_full() {
         println!("\n=== Test: Blocking When Full ===");
         let awaiter = EventAwaiter::new().unwrap();
-        let (buffer, mut consumer) =
-            RingBuffer::<256>::new(awaiter, 2).expect("failed to create buffer");
+        let (buffer, mut consumer) = RingBuffer::new(awaiter, 2).expect("failed to create buffer");
         let published = Arc::new(AtomicBool::new(false));
         let published_clone = published.clone();
 
         // Fill the buffer
         println!("Filling buffer with 2 messages (capacity: 2)");
-        buffer.publish([1u8; 256]);
-        buffer.publish([2u8; 256]);
+        buffer.publish("first".to_string());
+        buffer.publish("second".to_string());
         println!("Buffer is now full");
 
         // This should block
         let publisher = thread::spawn(move || {
             println!("[Publisher] Attempting to publish 3rd message (should block)...");
             let start = Instant::now();
-            buffer.publish([3u8; 256]);
+            buffer.publish("third".to_string());
             println!(
                 "[Publisher] Unblocked after {:.2?}! Message published",
                 start.elapsed()
@@ -208,7 +193,7 @@ mod tests {
         // Consumer drains one
         println!("[Main] Consuming one message to make space...");
         let msg = consumer.receive(None).unwrap().unwrap();
-        println!("[Main] Consumed message with value: {}", msg[0]);
+        println!("[Main] Consumed message with value: {}", msg);
 
         // Publisher should unblock
         publisher.join().unwrap();
@@ -220,8 +205,7 @@ mod tests {
     fn test_multiple_publishers_single_consumer() {
         println!("\n=== Test: Multiple Publishers, Single Consumer ===");
         let awaiter = EventAwaiter::new().unwrap();
-        let (buffer, mut consumer) =
-            RingBuffer::<256>::new(awaiter, 4).expect("failed to create buffer");
+        let (buffer, mut consumer) = RingBuffer::new(awaiter, 4).expect("failed to create buffer");
         let received = Arc::new(AtomicUsize::new(0));
         let messages_per_thread = 10;
         let num_threads = 3;
@@ -233,9 +217,7 @@ mod tests {
                 thread::spawn(move || {
                     println!("[Publisher {}] Starting", thread_id);
                     for i in 0..messages_per_thread {
-                        let mut msg = [0u8; 256];
-                        msg[0] = thread_id;
-                        msg[1] = i;
+                        let msg = format!("{}, {}", thread_id, i);
                         buffer.publish(msg);
                         if i % 3 == 0 {
                             println!("[Publisher {}] Published {} messages", thread_id, i + 1);
@@ -292,12 +274,5 @@ mod tests {
         println!("Total messages processed: {}", total);
         assert_eq!(total, 30);
         println!("✓ Test passed\n");
-    }
-
-    #[test]
-    #[should_panic(expected = "log slots must be at least 128 bytes")]
-    fn test_minimum_size_assertion() {
-        let awaiter = EventAwaiter::new().unwrap();
-        let _ = RingBuffer::<64>::new(awaiter, 10).expect("failed to create buffer");
     }
 }
