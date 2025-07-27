@@ -1,27 +1,25 @@
-use std::io::{self, Write};
+use std::fmt::Write;
+use std::io;
 
 use log::Level;
 
-use crate::{
-    rb::{RingBuffer, RingConsumer},
-    writer::LogWriter,
-};
+use crate::rb::{RingBuffer, RingConsumer};
 
 const ISO8601_FMT: &[time::format_description::FormatItem<'static>] = time::macros::format_description!(
     "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z"
 );
 
-pub struct Logger<const N: usize> {
-    rb: RingBuffer<N>,
+pub struct Logger {
+    rb: RingBuffer,
 }
 
-impl<const N: usize> Logger<N> {
-    pub(crate) fn new(rb: RingBuffer<N>) -> Self {
+impl Logger {
+    pub(crate) fn new(rb: RingBuffer) -> Self {
         Self { rb }
     }
 }
 
-impl<const N: usize> log::Log for Logger<N> {
+impl log::Log for Logger {
     fn enabled(&self, _: &log::Metadata) -> bool {
         true
     }
@@ -39,17 +37,19 @@ impl<const N: usize> log::Log for Logger<N> {
             }
         }
 
-        let mut buf = [0u8; N];
-        let mut wr = LogWriter::new(&mut buf);
+        let mut string = crate::pool::Pool::get();
+        let wr = &mut string;
         let now = time::OffsetDateTime::now_utc();
-        write!(&mut wr, "{}", GRAY).ok();
-        now.format_into(&mut wr, &ISO8601_FMT).ok();
-        write!(&mut wr, "{}", RESET).ok();
+        write!(wr, "{}", GRAY).ok();
+        unsafe {
+            now.format_into(wr.as_mut_vec(), &ISO8601_FMT).ok();
+        }
+        write!(wr, "{}", RESET).ok();
         let level = record.level();
         match record.line() {
             Some(line) => {
                 write!(
-                    &mut wr,
+                    wr,
                     " {}[{}]{} {}{}:{}{} - {}",
                     color(level),
                     level,
@@ -64,7 +64,7 @@ impl<const N: usize> log::Log for Logger<N> {
             }
             None => {
                 write!(
-                    &mut wr,
+                    wr,
                     " {}[{}]{} {}{}{} - {}",
                     color(level),
                     level,
@@ -78,8 +78,8 @@ impl<const N: usize> log::Log for Logger<N> {
             }
         }
 
-        wr.flush().ok();
-        self.rb.publish(buf);
+        string.write_str("\n").ok();
+        self.rb.publish(string);
     }
 
     fn flush(&self) {
@@ -87,24 +87,21 @@ impl<const N: usize> log::Log for Logger<N> {
     }
 }
 
-pub struct Appender<const N: usize, W: io::Write> {
-    cons: RingConsumer<N>,
+pub struct Appender<W: io::Write> {
+    cons: RingConsumer,
     wr: W,
 }
 
-impl<const N: usize, W: io::Write> Appender<N, W> {
-    pub(crate) fn new(cons: RingConsumer<N>, wr: W) -> Self {
+impl<W: io::Write> Appender<W> {
+    pub(crate) fn new(cons: RingConsumer, wr: W) -> Self {
         Self { cons, wr }
     }
 
     pub(crate) fn process_one(&mut self, timeout: Option<std::time::Duration>) -> io::Result<bool> {
         match self.cons.receive(timeout) {
-            Ok(Some(buf)) => {
-                let len = u16::from_le_bytes([buf[0], buf[1]]) as usize;
-                if len > 0 {
-                    self.wr.write_all(&buf[2..2 + len])?;
-                    self.wr.write_all(b"\n")?;
-                }
+            Ok(Some(s)) => {
+                self.wr.write(s.as_bytes())?;
+                crate::pool::Pool::put(s);
                 Ok(true)
             }
             Ok(None) => Ok(false), // spurious wakeup
@@ -128,8 +125,7 @@ mod tests {
     fn test_logger_appender_integration() {
         // Create ring buffer and logger
         let awaiter = EventAwaiter::new().unwrap();
-        let (rb, consumer) =
-            RingBuffer::<512>::new(awaiter, 10).expect("failed to create buffer");
+        let (rb, consumer) = RingBuffer::new(awaiter, 10).expect("failed to create buffer");
         let logger = Logger::new(rb);
 
         // Create appender with a Vec as writer (for testing)
@@ -162,35 +158,5 @@ mod tests {
 
         // Should have timestamp at the beginning
         assert!(output_str.contains("T")); // ISO8601 format has T between date and time
-    }
-
-    #[test]
-    fn test_message_truncation() {
-        // Small buffer size to test truncation
-        let awaiter = EventAwaiter::new().unwrap();
-        let (rb, consumer) =
-            RingBuffer::<128>::new(awaiter, 10).expect("failed to create buffer");
-        let logger = Logger::new(rb);
-        let mut appender = Appender::new(consumer, Vec::new());
-
-        // Log a very long message
-        let long_msg = "x".repeat(200);
-        logger.log(
-            &Record::builder()
-                .args(format_args!("{}", long_msg))
-                .level(Level::Info)
-                .target("test")
-                .line(Some(23))
-                .build(),
-        );
-
-        appender.process_one(None).expect("failed to process");
-
-        let output_str = String::from_utf8(appender.wr).expect("invalid utf8");
-
-        println!("{}", output_str);
-        // Should be truncated and have ellipsis
-        assert!(output_str.contains("..."));
-        assert!(output_str.len() < 200); // Much shorter than original message
     }
 }

@@ -15,8 +15,8 @@ use crate::{
 
 mod logger;
 pub(crate) mod notifier;
+pub(crate) mod pool;
 pub(crate) mod rb;
-pub(crate) mod writer;
 
 pub use notifier::{EventAwaiter, EventNotifier};
 
@@ -117,7 +117,7 @@ where
         let level = self.level.ok_or(InqJetBuilderError::NoConfiguredLogLevel)?;
         let awaiter = EventAwaiter::new()?;
 
-        let (rb, cons) = RingBuffer::<N>::new(awaiter, capacity)?;
+        let (rb, cons) = RingBuffer::new(awaiter, capacity)?;
         let notifier = rb.notifier();
         let logger = Logger::new(rb);
         let mut appender = Appender::new(cons, writer);
@@ -150,7 +150,7 @@ mod tests {
 
     use super::*;
 
-    #[ignore]
+    // #[ignore]
     #[test]
     fn bench_inqjet() {
         let _guard = InqJetBuilder::with_normal_slots()
@@ -174,7 +174,7 @@ mod tests {
         println!("InqJet (EventFD) total performance: {:?}", total);
     }
 
-    #[ignore]
+    // #[ignore]
     #[test]
     fn bench_tracing() {
         LogTracer::init().unwrap();
