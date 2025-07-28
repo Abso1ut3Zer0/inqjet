@@ -8,7 +8,7 @@ use crossbeam_queue::SegQueue;
 
 /// Maximum capacity for pooled strings. Strings exceeding this size will be
 /// shrunk back to this capacity when returned to the pool.
-const STRING_CAPACITY: usize = 256;
+pub(crate) static mut STRING_CAPACITY: usize = 256;
 
 /// Global thread-safe pool of reusable `String` instances.
 ///
@@ -77,7 +77,7 @@ impl Pool {
     #[inline(always)]
     pub(crate) fn get() -> String {
         POOL.pop()
-            .unwrap_or_else(|| String::with_capacity(STRING_CAPACITY))
+            .unwrap_or_else(|| unsafe { String::with_capacity(STRING_CAPACITY) })
     }
 
     /// Returns a `String` to the pool for reuse.
@@ -113,8 +113,10 @@ impl Pool {
     #[inline(always)]
     pub(crate) fn put(mut s: String) {
         s.clear();
-        if s.capacity() > STRING_CAPACITY {
-            s.shrink_to(STRING_CAPACITY);
+        unsafe {
+            if s.capacity() > STRING_CAPACITY {
+                s.shrink_to(STRING_CAPACITY);
+            }
         }
         POOL.push(s);
     }
