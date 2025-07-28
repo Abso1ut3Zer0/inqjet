@@ -1,4 +1,5 @@
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::{fmt::Write, sync::Arc};
 
 use crossbeam_utils::sync::Parker;
@@ -91,12 +92,18 @@ impl log::Log for Logger {
 pub struct Appender<W: io::Write> {
     chan: Arc<Channel>,
     parker: Parker,
+    running: Arc<AtomicBool>,
     wr: W,
 }
 
 impl<W: io::Write> Appender<W> {
-    pub(crate) fn new(chan: Arc<Channel>, parker: Parker, wr: W) -> Self {
-        Self { chan, parker, wr }
+    pub(crate) fn new(chan: Arc<Channel>, parker: Parker, running: Arc<AtomicBool>, wr: W) -> Self {
+        Self {
+            chan,
+            parker,
+            running,
+            wr,
+        }
     }
 
     pub(crate) fn block_on_append(
@@ -105,31 +112,29 @@ impl<W: io::Write> Appender<W> {
     ) -> io::Result<()> {
         let mut written = false;
         match timeout {
-            Some(timeout) => loop {
-                while let Some(s) = self.chan.pop() {
-                    self.wr.write(s.as_bytes())?;
-                    crate::pool::Pool::put(s);
-                    written = true;
-                }
+            Some(timeout) => {
+                while !written && self.running.load(Ordering::Relaxed) {
+                    while let Some(s) = self.chan.pop() {
+                        self.wr.write(s.as_bytes())?;
+                        crate::pool::Pool::put(s);
+                        written = true;
+                    }
 
-                if written {
-                    return self.wr.flush();
+                    self.parker.park_timeout(timeout);
                 }
-
-                self.parker.park_timeout(timeout);
-            },
-            None => loop {
-                while let Some(s) = self.chan.pop() {
-                    self.wr.write(s.as_bytes())?;
-                    crate::pool::Pool::put(s);
-                    written = true;
+            }
+            None => {
+                while !written && self.running.load(Ordering::Relaxed) {
+                    while let Some(s) = self.chan.pop() {
+                        self.wr.write(s.as_bytes())?;
+                        crate::pool::Pool::put(s);
+                        written = true;
+                    }
                 }
-
-                if written {
-                    return self.wr.flush();
-                }
-            },
+            }
         }
+
+        self.wr.flush()
     }
 
     pub(crate) fn flush(&mut self) -> io::Result<()> {
@@ -148,10 +153,11 @@ mod tests {
         let parker = Parker::new();
         let chan = Arc::new(Channel::new(4, parker.unparker().to_owned()));
         let logger = Logger::new(chan.clone());
+        let running = Arc::new(AtomicBool::new(true));
 
         // Create appender with a Vec as writer (for testing)
         let output = Vec::new();
-        let mut appender = Appender::new(chan, parker, output);
+        let mut appender = Appender::new(chan, parker, running, output);
 
         // Log a message directly using the Log trait
         logger.log(

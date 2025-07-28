@@ -127,8 +127,8 @@ where
         let notifier = parker.unparker().to_owned();
         let chan = Arc::new(Channel::new(capacity, parker.unparker().to_owned()));
         let logger = Logger::new(chan.clone());
-        let mut appender = Appender::new(chan, parker, writer);
         let flag = Arc::new(AtomicBool::new(true));
+        let mut appender = Appender::new(chan, parker, flag.clone(), writer);
         log::set_boxed_logger(Box::new(logger))?;
         log::set_max_level(level);
 
@@ -163,6 +163,7 @@ mod tests {
         let _guard = InqJetBuilder::with_normal_slots()
             .with_writer(io::stdout())
             .with_log_level(LevelFilter::Info)
+            .with_timeout(None)
             .build()
             .unwrap();
 
