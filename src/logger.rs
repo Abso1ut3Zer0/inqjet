@@ -96,6 +96,15 @@ pub struct Appender<W: io::Write> {
     wr: W,
 }
 
+impl<W: io::Write> Drop for Appender<W> {
+    fn drop(&mut self) {
+        while let Some(s) = self.chan.pop() {
+            self.wr.write(s.as_bytes()).ok();
+        }
+        self.flush().ok();
+    }
+}
+
 impl<W: io::Write> Appender<W> {
     pub(crate) fn new(chan: Arc<Channel>, parker: Parker, running: Arc<AtomicBool>, wr: W) -> Self {
         Self {
