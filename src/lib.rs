@@ -157,7 +157,7 @@ mod tests {
 
     use super::*;
 
-    #[ignore]
+    // #[ignore]
     #[test]
     fn bench_inqjet() {
         let _guard = InqJetBuilder::with_normal_slots()
