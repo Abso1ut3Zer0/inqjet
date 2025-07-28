@@ -446,6 +446,10 @@ impl<W: io::Write> Appender<W> {
                         crate::pool::Pool::put(s);
                         written = true;
                     }
+
+                    // Emit spin hint to cpu to reduce
+                    // overall cpu usage.
+                    std::hint::spin_loop();
                 }
             }
         }
