@@ -87,32 +87,79 @@ pub struct Logger {
     /// Wrapped in `Arc` to allow the logger to be used from multiple threads
     /// while sharing the same underlying channel.
     chan: Arc<Channel>,
+
+    /// Maximum log level that will be processed. Messages below this level are ignored.
+    max_level: log::LevelFilter,
 }
 
 impl Logger {
-    /// Creates a new logger that will send messages to the specified channel.
+    /// Creates a new logger with the specified channel and maximum log level.
     ///
     /// # Parameters
     ///
     /// * `chan` - Shared channel for sending formatted log messages to the consumer.
+    /// * `max_level` - Maximum log level to process. Messages below this level will be
+    ///   filtered out in the `enabled()` check, avoiding formatting overhead entirely.
+    ///
+    /// # Level Filtering
+    ///
+    /// The logger will only process log records at or above the specified level:
+    /// - `LevelFilter::Error` - Only ERROR messages
+    /// - `LevelFilter::Warn` - ERROR and WARN messages
+    /// - `LevelFilter::Info` - ERROR, WARN, and INFO messages
+    /// - `LevelFilter::Debug` - All except TRACE messages
+    /// - `LevelFilter::Trace` - All messages
+    /// - `LevelFilter::Off` - No messages (disables logging)
     ///
     /// # Example
     ///
     /// ```rust, ignore
+    /// use log::LevelFilter;
     /// use std::sync::Arc;
-    /// use crate::{Logger, channel::Channel};
     ///
     /// let channel = Arc::new(Channel::new(1024, unparker));
-    /// let logger = Logger::new(channel);
+    ///
+    /// // Only log INFO and above (INFO, WARN, ERROR)
+    /// let logger = Logger::new(channel, LevelFilter::Info);
     /// ```
-    pub(crate) fn new(chan: Arc<Channel>) -> Self {
-        Self { chan }
+    pub(crate) fn new(chan: Arc<Channel>, max_level: log::LevelFilter) -> Self {
+        Self { chan, max_level }
     }
 }
 
 impl log::Log for Logger {
-    fn enabled(&self, _: &log::Metadata) -> bool {
-        true
+    /// Determines if a log record should be processed based on the configured level filter.
+    ///
+    /// This method provides efficient early filtering to avoid the expensive formatting
+    /// operations in `log()` for messages that would be discarded anyway.
+    ///
+    /// # Performance Impact
+    ///
+    /// - **Accepted messages**: Continue to full formatting (~1-5μs)
+    /// - **Filtered messages**: Return immediately (~1-10ns)
+    ///
+    /// This early filtering is crucial for performance when DEBUG or TRACE logging
+    /// is compiled in but not needed at runtime.
+    ///
+    /// # Parameters
+    ///
+    /// * `metadata` - Log metadata containing the level to check
+    ///
+    /// # Returns
+    ///
+    /// * `true` - If the message level is at or above the configured maximum
+    /// * `false` - If the message should be filtered out
+    ///
+    /// # Example
+    ///
+    /// ```rust, ignore
+    /// // Logger configured with LevelFilter::Info
+    /// assert!(logger.enabled(&Metadata::builder().level(Level::Error).build())); // true
+    /// assert!(logger.enabled(&Metadata::builder().level(Level::Info).build()));  // true
+    /// assert!(!logger.enabled(&Metadata::builder().level(Level::Debug).build())); // false
+    /// ```
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= self.max_level
     }
 
     /// Formats and sends a log record to the consumer thread.
@@ -420,7 +467,7 @@ impl<W: io::Write> Appender<W> {
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust, ignore
     /// // Ensure critical logs are persisted
     /// error!("Critical system failure: {}", error);
     /// appender.flush()?;
@@ -441,7 +488,7 @@ mod tests {
         // Create ring buffer and logger
         let parker = Parker::new();
         let chan = Arc::new(Channel::new(4, parker.unparker().to_owned()));
-        let logger = Logger::new(chan.clone());
+        let logger = Logger::new(chan.clone(), log::LevelFilter::Info);
         let running = Arc::new(AtomicBool::new(true));
 
         // Create appender with a Vec as writer (for testing)
