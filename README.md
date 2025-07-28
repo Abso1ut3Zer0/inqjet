@@ -108,6 +108,21 @@ let _guard = InqJetBuilder::default()
 
 ### Performance Tuning
 
+#### String Capacity
+
+Configure the string capacity in the string pool based on your typical log message length.
+
+```rust
+let _guard = InqJetBuilder::default()
+    .with_string_capacity(1024)  // 1KB sized strings in pool
+    .build()?;
+```
+
+- **128-256**: Memory-constrained environments, short messages
+- **256-512**: Balanced default (256 is default), handles most messages
+- **512-1024**: Verbose logging, detailed error messages
+- **1024+**: Very detailed logging, structured data, stack traces
+
 #### Channel Capacity
 
 Size the channel based on your burst patterns:

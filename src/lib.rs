@@ -49,9 +49,11 @@
 //!
 //! ## String Pool
 //!
-//! InqJet uses a dynamic string pool with 256-byte initial capacity per string.
-//! Strings automatically grow as needed and are shrunk back to 256 bytes when
-//! returned to the pool, providing optimal memory usage without truncation.
+//! InqJet uses a dynamic string pool with configurable initial capacity per string
+//! (default: 256 bytes). Strings automatically grow as needed and are shrunk back
+//! to the configured capacity when returned to the pool, providing optimal memory
+//! usage without truncation. Use `.with_str_len()` during initialization to tune
+//! the pool size for your application's typical message length.
 //!
 //! ## Channel Capacity
 //!
@@ -352,6 +354,51 @@ where
     /// ```
     pub fn with_capacity(mut self, cap: usize) -> Self {
         self.cap = Some(cap);
+        self
+    }
+
+    /// Sets the global default string capacity for all pooled strings.
+    ///
+    /// This configures the target capacity for strings in the global string pool.
+    /// All pooled strings will be allocated with this initial capacity and shrunk
+    /// back to this size when returned to the pool.
+    ///
+    /// # Safety and Usage
+    ///
+    /// This method uses `unsafe` code to modify a global static and **must only be called
+    /// during logger initialization** before any logging occurs. Calling this after
+    /// logging has started may cause undefined behavior or memory issues.
+    ///
+    /// # Parameters
+    ///
+    /// * `str_cap` - Target capacity in bytes for pooled strings. Should be sized
+    ///   based on your typical log message length plus formatting overhead (~50-100 bytes).
+    ///
+    /// # Sizing Guidelines
+    ///
+    /// - **128-256 bytes**: Memory-constrained environments, short messages
+    /// - **256-512 bytes**: Balanced default, handles most typical log messages
+    /// - **512-1024 bytes**: Verbose logging, detailed error messages
+    /// - **1024+ bytes**: Very detailed logging, structured data, stack traces
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// // Configure for verbose logging with large messages
+    /// let _guard = InqJetBuilder::default()
+    ///     .with_string_capacity(1024)  // 1KB per pooled string
+    ///     .with_writer(std::io::stdout())
+    ///     .with_log_level(LevelFilter::Debug)
+    ///     .build()?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    ///
+    /// Choose based on your typical message length to minimize both allocations and
+    /// memory waste.
+    pub fn with_string_capacity(self, str_cap: usize) -> Self {
+        unsafe {
+            crate::pool::STRING_CAPACITY = str_cap;
+        }
         self
     }
 
