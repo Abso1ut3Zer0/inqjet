@@ -178,7 +178,7 @@ mod tests {
         }
 
         let total = std::time::Duration::from_nanos(total as u64);
-        println!("InqJet (EventFD) total performance: {:?}", total);
+        println!("InqJet total performance: {:?}", total);
     }
 
     #[ignore]
