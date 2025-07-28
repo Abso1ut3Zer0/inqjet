@@ -1,21 +1,22 @@
-use std::fmt::Write;
 use std::io;
+use std::{fmt::Write, sync::Arc};
 
+use crossbeam_utils::sync::Parker;
 use log::Level;
 
-use crate::rb::{RingBuffer, RingConsumer};
+use crate::channel::Channel;
 
 const ISO8601_FMT: &[time::format_description::FormatItem<'static>] = time::macros::format_description!(
     "[year]-[month]-[day]T[hour]:[minute]:[second].[subsecond digits:6]Z"
 );
 
 pub struct Logger {
-    rb: RingBuffer,
+    chan: Arc<Channel>,
 }
 
 impl Logger {
-    pub(crate) fn new(rb: RingBuffer) -> Self {
-        Self { rb }
+    pub(crate) fn new(chan: Arc<Channel>) -> Self {
+        Self { chan }
     }
 }
 
@@ -37,8 +38,8 @@ impl log::Log for Logger {
             }
         }
 
-        let mut string = crate::pool::Pool::get();
-        let wr = &mut string;
+        let mut s = crate::pool::Pool::get();
+        let wr = &mut s;
         let now = time::OffsetDateTime::now_utc();
         write!(wr, "{}", GRAY).ok();
         unsafe {
@@ -78,8 +79,8 @@ impl log::Log for Logger {
             }
         }
 
-        string.write_str("\n").ok();
-        self.rb.publish(string);
+        s.write_str("\n").ok();
+        self.chan.push(s);
     }
 
     fn flush(&self) {
@@ -88,24 +89,46 @@ impl log::Log for Logger {
 }
 
 pub struct Appender<W: io::Write> {
-    cons: RingConsumer,
+    chan: Arc<Channel>,
+    parker: Parker,
     wr: W,
 }
 
 impl<W: io::Write> Appender<W> {
-    pub(crate) fn new(cons: RingConsumer, wr: W) -> Self {
-        Self { cons, wr }
+    pub(crate) fn new(chan: Arc<Channel>, parker: Parker, wr: W) -> Self {
+        Self { chan, parker, wr }
     }
 
-    pub(crate) fn process_one(&mut self, timeout: Option<std::time::Duration>) -> io::Result<bool> {
-        match self.cons.receive(timeout) {
-            Ok(Some(s)) => {
-                self.wr.write(s.as_bytes())?;
-                crate::pool::Pool::put(s);
-                Ok(true)
-            }
-            Ok(None) => Ok(false), // spurious wakeup
-            Err(err) => Err(err),
+    pub(crate) fn block_on_append(
+        &mut self,
+        timeout: Option<std::time::Duration>,
+    ) -> io::Result<()> {
+        let mut written = false;
+        match timeout {
+            Some(timeout) => loop {
+                while let Some(s) = self.chan.pop() {
+                    self.wr.write(s.as_bytes())?;
+                    crate::pool::Pool::put(s);
+                    written = true;
+                }
+
+                if written {
+                    return self.wr.flush();
+                }
+
+                self.parker.park_timeout(timeout);
+            },
+            None => loop {
+                while let Some(s) = self.chan.pop() {
+                    self.wr.write(s.as_bytes())?;
+                    crate::pool::Pool::put(s);
+                    written = true;
+                }
+
+                if written {
+                    return self.wr.flush();
+                }
+            },
         }
     }
 
@@ -116,21 +139,19 @@ impl<W: io::Write> Appender<W> {
 
 #[cfg(test)]
 mod tests {
-    use crate::notifier::EventAwaiter;
-
     use super::*;
     use log::{Level, Log, Record};
 
     #[test]
     fn test_logger_appender_integration() {
         // Create ring buffer and logger
-        let awaiter = EventAwaiter::new().unwrap();
-        let (rb, consumer) = RingBuffer::new(awaiter, 10).expect("failed to create buffer");
-        let logger = Logger::new(rb);
+        let parker = Parker::new();
+        let chan = Arc::new(Channel::new(4, parker.unparker().to_owned()));
+        let logger = Logger::new(chan.clone());
 
         // Create appender with a Vec as writer (for testing)
         let output = Vec::new();
-        let mut appender = Appender::new(consumer, output);
+        let mut appender = Appender::new(chan, parker, output);
 
         // Log a message directly using the Log trait
         logger.log(
@@ -143,8 +164,7 @@ mod tests {
         );
 
         // Process the log
-        let processed = appender.process_one(None).expect("failed to process");
-        assert!(processed, "Should have processed a message");
+        appender.block_on_append(None).expect("failed to process");
 
         // Check output
         let output_str = String::from_utf8(appender.wr.clone()).expect("invalid utf8");

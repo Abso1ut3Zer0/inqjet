@@ -12,6 +12,7 @@ thiserror = "2.0.12"
 time = { version = "0.3.41", features = ["formatting", "macros"] }
 
 [dev-dependencies]
+serial_test = "3.2.0"
 tracing = { version = "0.1.40", features = ["log"] }
 tracing-appender = "0.2.3"
 tracing-log = "0.2.0"
