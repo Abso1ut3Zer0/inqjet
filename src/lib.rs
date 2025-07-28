@@ -6,32 +6,31 @@ use std::{
     },
 };
 
+use crossbeam_utils::sync::{Parker, Unparker};
 use log::LevelFilter;
 
 use crate::{
+    channel::Channel,
     logger::{Appender, Logger},
-    rb::RingBuffer,
 };
 
-mod logger;
-pub(crate) mod notifier;
+pub(crate) mod channel;
+pub(crate) mod logger;
 pub(crate) mod pool;
-pub(crate) mod rb;
-
-pub use notifier::{EventAwaiter, EventNotifier};
 
 const DEFAULT_CAPACITY: usize = 256;
+const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5);
 
 pub struct InqJetGuard {
     handle: Option<std::thread::JoinHandle<()>>,
     flag: Arc<AtomicBool>,
-    notifier: EventNotifier,
+    notifier: Unparker,
 }
 
 impl Drop for InqJetGuard {
     fn drop(&mut self) {
         self.flag.store(false, Ordering::Release);
-        self.notifier.notify(); // tell background thread to wakeup
+        self.notifier.unpark(); // tell background thread to wakeup
         self.handle.take().map(|handle| {
             let _ = handle.join();
         });
@@ -54,6 +53,7 @@ pub struct InqJetBuilder<W, const N: usize = 512> {
     wr: Option<W>,
     level: Option<LevelFilter>,
     cap: Option<usize>,
+    timeout: Option<std::time::Duration>,
 }
 
 impl<W> InqJetBuilder<W, 512>
@@ -93,6 +93,7 @@ where
             wr: None,
             level: None,
             cap: None,
+            timeout: Some(DEFAULT_TIMEOUT),
         }
     }
 
@@ -111,16 +112,22 @@ where
         self
     }
 
+    pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     pub fn build(self) -> Result<InqJetGuard, InqJetBuilderError> {
         let capacity = self.cap.unwrap_or(DEFAULT_CAPACITY);
         let writer = self.wr.ok_or(InqJetBuilderError::NoConfiguredWriter)?;
         let level = self.level.ok_or(InqJetBuilderError::NoConfiguredLogLevel)?;
-        let awaiter = EventAwaiter::new()?;
+        let timeout = self.timeout;
 
-        let (rb, cons) = RingBuffer::new(awaiter, capacity)?;
-        let notifier = rb.notifier();
-        let logger = Logger::new(rb);
-        let mut appender = Appender::new(cons, writer);
+        let parker = Parker::new();
+        let notifier = parker.unparker().to_owned();
+        let chan = Arc::new(Channel::new(capacity, parker.unparker().to_owned()));
+        let logger = Logger::new(chan.clone());
+        let mut appender = Appender::new(chan, parker, writer);
         let flag = Arc::new(AtomicBool::new(true));
         log::set_boxed_logger(Box::new(logger))?;
         log::set_max_level(level);
@@ -128,7 +135,7 @@ where
         let running = flag.clone();
         let handle = std::thread::spawn(move || {
             while running.load(Ordering::Relaxed) {
-                let _ = appender.process_one(None);
+                let _ = appender.block_on_append(timeout);
             }
 
             let _ = appender.flush();
@@ -150,7 +157,7 @@ mod tests {
 
     use super::*;
 
-    // #[ignore]
+    #[ignore]
     #[test]
     fn bench_inqjet() {
         let _guard = InqJetBuilder::with_normal_slots()
@@ -171,10 +178,10 @@ mod tests {
         }
 
         let total = std::time::Duration::from_nanos(total as u64);
-        println!("InqJet (EventFD) total performance: {:?}", total);
+        println!("InqJet total performance: {:?}", total);
     }
 
-    // #[ignore]
+    #[ignore]
     #[test]
     fn bench_tracing() {
         LogTracer::init().unwrap();
