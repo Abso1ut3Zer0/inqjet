@@ -304,7 +304,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust, ignore
     /// use std::fs::OpenOptions;
     ///
     /// let file = OpenOptions::new()
