@@ -1,6 +1,6 @@
 [package]
 name = "inqjet"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors = ["Abso1ut3Zer0"]
 description = "Ultra-fast, low-latency logging for Rust applications"
@@ -20,6 +20,7 @@ thiserror = "2.0.12"
 time = { version = "0.3.41", features = ["formatting", "macros"] }
 
 [dev-dependencies]
+hdrhistogram = "7.5.4"
 tracing = { version = "0.1.40", features = ["log"] }
 tracing-appender = "0.2.3"
 tracing-log = "0.2.0"

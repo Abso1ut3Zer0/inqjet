@@ -104,8 +104,8 @@
 use std::{
     io,
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
+        Arc,
     },
 };
 
@@ -536,6 +536,16 @@ where
         let level = self.level.ok_or(InqJetBuilderError::NoConfiguredLogLevel)?;
         let timeout = self.timeout;
 
+        std::hint::black_box({
+            let mut v = Vec::with_capacity(capacity);
+            for _ in 0..capacity {
+                v.push(crate::pool::Pool::get());
+            }
+
+            v.drain(..).for_each(|s| crate::pool::Pool::put(s));
+            drop(v);
+        });
+
         let parker = Parker::new();
         let notifier = parker.unparker().to_owned();
         let chan = Arc::new(Channel::new(capacity, parker.unparker().to_owned()));
@@ -564,11 +574,48 @@ where
 
 #[cfg(test)]
 mod tests {
+    use hdrhistogram::Histogram;
     use tracing::Level;
     use tracing_log::LogTracer;
     use tracing_subscriber::fmt;
 
     use super::*;
+
+    fn print_histogram_stats(name: &str, hist: &Histogram<u64>) {
+        println!("\n=== {} Performance Profile ===", name);
+        println!("Count: {}", hist.len());
+        println!("Min: {:>8.2}μs", hist.min() as f64 / 1000.0);
+        println!("Mean: {:>7.2}μs", hist.mean() / 1000.0);
+        println!("Max: {:>8.2}μs", hist.max() as f64 / 1000.0);
+        println!("StdDev: {:>5.2}μs", hist.stdev() / 1000.0);
+        println!("");
+        println!("Percentiles:");
+        println!(
+            "  50th: {:>6.2}μs",
+            hist.value_at_quantile(0.50) as f64 / 1000.0
+        );
+        println!(
+            "  90th: {:>6.2}μs",
+            hist.value_at_quantile(0.90) as f64 / 1000.0
+        );
+        println!(
+            "  95th: {:>6.2}μs",
+            hist.value_at_quantile(0.95) as f64 / 1000.0
+        );
+        println!(
+            "  99th: {:>6.2}μs",
+            hist.value_at_quantile(0.99) as f64 / 1000.0
+        );
+        println!(
+            " 99.9th: {:>5.2}μs",
+            hist.value_at_quantile(0.999) as f64 / 1000.0
+        );
+        println!(
+            " 99.99th: {:>4.2}μs",
+            hist.value_at_quantile(0.9999) as f64 / 1000.0
+        );
+        println!("");
+    }
 
     #[ignore]
     #[test]
@@ -576,23 +623,44 @@ mod tests {
         let _guard = InqJetBuilder::default()
             .with_writer(io::stdout())
             .with_log_level(LevelFilter::Info)
-            .with_timeout(None)
+            .with_capacity(2048)
+            .with_timeout(None) // Spinning mode for lowest latency
             .build()
             .unwrap();
 
-        let n = 1_000;
-        let duration = std::time::Duration::from_millis(5);
-        let mut total = 0;
-        for i in 0..n {
-            std::thread::sleep(duration);
-            let now = std::time::Instant::now();
-            log::info!("logging to inqjet logger! msg number: {}", i);
-            let elapsed = now.elapsed();
-            total += elapsed.as_nanos();
+        // Let the background thread start up
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let n = 100_000;
+        let mut hist = Histogram::<u64>::new_with_bounds(1, 60 * 1000 * 1000, 3).unwrap(); // 1ns to 60s, 3 sig figs
+
+        println!("Warming up InqJet...");
+        // Warmup
+        for i in 0..100 {
+            log::info!("warmup message {}", i);
         }
 
-        let total = std::time::Duration::from_nanos(total as u64);
-        println!("InqJet total performance: {:?}", total);
+        // Small delay to let warmup messages process
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        println!("Starting InqJet benchmark with {} iterations...", n);
+
+        for i in 0..n {
+            let start = std::time::Instant::now();
+            log::info!("logging to inqjet logger! msg number: {}", i);
+            let elapsed = start.elapsed();
+
+            // Record in nanoseconds
+            hist.record(elapsed.as_nanos() as u64).unwrap();
+
+            // Optional: add small delay to simulate real workload
+            if i % 1000 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        print_histogram_stats("InqJet", &hist);
     }
 
     #[ignore]
@@ -602,24 +670,42 @@ mod tests {
         let builder = tracing_appender::non_blocking::NonBlockingBuilder::default()
             .buffered_lines_limit(262_144);
         let (writer, _guard) = builder.finish(io::stdout());
+
         let subscriber = fmt::Subscriber::builder()
             .with_writer(writer)
             .with_max_level(Level::INFO)
             .finish();
         tracing::subscriber::set_global_default(subscriber).unwrap();
 
-        let n = 1_000;
-        let duration = std::time::Duration::from_millis(5);
-        let mut total = 0;
-        for i in 0..n {
-            std::thread::sleep(duration);
-            let now = std::time::Instant::now();
-            log::info!("logging to tracing logger! msg number: {}", i);
-            let elapsed = now.elapsed();
-            total += elapsed.as_nanos();
+        // Let the tracing system initialize
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let n = 100_000;
+        let mut hist = Histogram::<u64>::new_with_bounds(1, 60 * 1000 * 1000, 3).unwrap();
+
+        println!("Warming up Tracing...");
+        // Warmup
+        for i in 0..100 {
+            log::info!("warmup message {}", i);
         }
 
-        let total = std::time::Duration::from_nanos(total as u64);
-        println!("Tracing total performance: {:?}", total);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        println!("Starting Tracing benchmark with {} iterations...", n);
+
+        for i in 0..n {
+            let start = std::time::Instant::now();
+            log::info!("logging to tracing logger! msg number: {}", i);
+            let elapsed = start.elapsed();
+
+            hist.record(elapsed.as_nanos() as u64).unwrap();
+
+            if i % 1000 == 0 {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+        }
+
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        print_histogram_stats("Tracing", &hist);
     }
 }
