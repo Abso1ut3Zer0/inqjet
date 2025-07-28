@@ -1,7 +1,16 @@
 [package]
 name = "inqjet"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
+authors = ["Abso1ut3Zer0"]
+description = "Ultra-fast, low-latency logging for Rust applications"
+documentation = "https://docs.rs/inqjet"
+homepage = "https://github.com/Abso1ut3Zer0/inqjet"
+repository = "https://github.com/Abso1ut3Zer0/inqjet"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["logging", "performance", "low-latency", "async", "lock-free"]
+categories = ["development-tools::debugging"]
 
 [dependencies]
 crossbeam-queue = "0.3.12"
