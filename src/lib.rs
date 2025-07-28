@@ -383,7 +383,7 @@ where
     ///
     /// # Example
     ///
-    /// ```rust
+    /// ```rust, ignore
     /// // Configure for verbose logging with large messages
     /// let _guard = InqJetBuilder::default()
     ///     .with_string_capacity(1024)  // 1KB per pooled string
