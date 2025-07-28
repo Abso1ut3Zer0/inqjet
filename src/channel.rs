@@ -5,7 +5,7 @@
 //! consumer notification to minimize producer-side overhead while ensuring reliable delivery.
 
 use crossbeam_queue::ArrayQueue;
-use crossbeam_utils::{Backoff, sync::Unparker};
+use crossbeam_utils::{sync::Unparker, Backoff};
 
 /// A bounded, lock-free channel for transmitting log messages between producer and consumer threads.
 ///
@@ -197,8 +197,8 @@ mod tests {
     use super::*;
     use crossbeam_utils::sync::Parker;
     use std::sync::{
-        Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
+        Arc,
     };
     use std::thread;
     use std::time::{Duration, Instant};
