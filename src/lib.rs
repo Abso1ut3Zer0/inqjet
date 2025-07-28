@@ -536,6 +536,16 @@ where
         let level = self.level.ok_or(InqJetBuilderError::NoConfiguredLogLevel)?;
         let timeout = self.timeout;
 
+        std::hint::black_box({
+            let mut v = Vec::with_capacity(capacity);
+            for _ in 0..capacity {
+                v.push(crate::pool::Pool::get());
+            }
+
+            v.drain(..).for_each(|s| crate::pool::Pool::put(s));
+            drop(v);
+        });
+
         let parker = Parker::new();
         let notifier = parker.unparker().to_owned();
         let chan = Arc::new(Channel::new(capacity, parker.unparker().to_owned()));
@@ -613,6 +623,7 @@ mod tests {
         let _guard = InqJetBuilder::default()
             .with_writer(io::stdout())
             .with_log_level(LevelFilter::Info)
+            .with_capacity(2048)
             .with_timeout(None) // Spinning mode for lowest latency
             .build()
             .unwrap();
@@ -620,7 +631,7 @@ mod tests {
         // Let the background thread start up
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let n = 10_000;
+        let n = 100_000;
         let mut hist = Histogram::<u64>::new_with_bounds(1, 60 * 1000 * 1000, 3).unwrap(); // 1ns to 60s, 3 sig figs
 
         println!("Warming up InqJet...");
@@ -644,10 +655,11 @@ mod tests {
 
             // Optional: add small delay to simulate real workload
             if i % 1000 == 0 {
-                std::thread::sleep(std::time::Duration::from_micros(100));
+                std::thread::sleep(std::time::Duration::from_millis(25));
             }
         }
 
+        std::thread::sleep(std::time::Duration::from_secs(1));
         print_histogram_stats("InqJet", &hist);
     }
 
@@ -668,7 +680,7 @@ mod tests {
         // Let the tracing system initialize
         std::thread::sleep(std::time::Duration::from_millis(100));
 
-        let n = 10_000;
+        let n = 100_000;
         let mut hist = Histogram::<u64>::new_with_bounds(1, 60 * 1000 * 1000, 3).unwrap();
 
         println!("Warming up Tracing...");
@@ -689,10 +701,11 @@ mod tests {
             hist.record(elapsed.as_nanos() as u64).unwrap();
 
             if i % 1000 == 0 {
-                std::thread::sleep(std::time::Duration::from_micros(100));
+                std::thread::sleep(std::time::Duration::from_millis(25));
             }
         }
 
+        std::thread::sleep(std::time::Duration::from_secs(1));
         print_histogram_stats("Tracing", &hist);
     }
 }
