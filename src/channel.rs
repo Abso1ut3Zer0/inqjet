@@ -196,7 +196,6 @@ impl Channel {
 mod tests {
     use super::*;
     use crossbeam_utils::sync::Parker;
-    use serial_test::serial;
     use std::sync::{
         Arc,
         atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -205,7 +204,6 @@ mod tests {
     use std::time::{Duration, Instant};
 
     #[test]
-    #[serial]
     fn test_basic_publish_receive() {
         println!("\n=== Test 1: Basic Publish/Receive ===");
 
@@ -225,7 +223,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_event_wakeup_across_threads() {
         println!("\n=== Test 2: Event Wakeup Across Threads ===");
 
@@ -283,7 +280,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_blocking_when_full() {
         println!("\n=== Test 3: Blocking When Full ===");
 
@@ -327,7 +323,6 @@ mod tests {
     }
 
     #[test]
-    #[serial]
     fn test_multiple_publishers_single_consumer() {
         println!("\n=== Test 4: Multiple Publishers, Single Consumer ===");
 
