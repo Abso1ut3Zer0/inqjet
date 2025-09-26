@@ -549,8 +549,8 @@ where
         let parker = Parker::new();
         let notifier = parker.unparker().to_owned();
         let chan = Arc::new(Channel::new(capacity, parker.unparker().to_owned()));
-        let logger = Logger::new(chan.clone(), level);
         let flag = Arc::new(AtomicBool::new(true));
+        let logger = Logger::new(chan.clone(), level, flag.clone());
         let mut appender = Appender::new(chan, parker, flag.clone(), writer);
         log::set_boxed_logger(Box::new(logger))?;
         log::set_max_level(level);
