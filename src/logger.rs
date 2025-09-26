@@ -90,6 +90,15 @@ pub struct Logger {
 
     /// Maximum log level that will be processed. Messages below this level are ignored.
     max_level: log::LevelFilter,
+
+    /// Flag to indicate if the logger is still running.
+    running: Arc<AtomicBool>,
+}
+
+impl Drop for Logger {
+    fn drop(&mut self) {
+        self.running.store(false, Ordering::Relaxed);
+    }
 }
 
 impl Logger {
@@ -122,8 +131,16 @@ impl Logger {
     /// // Only log INFO and above (INFO, WARN, ERROR)
     /// let logger = Logger::new(channel, LevelFilter::Info);
     /// ```
-    pub(crate) fn new(chan: Arc<Channel>, max_level: log::LevelFilter) -> Self {
-        Self { chan, max_level }
+    pub(crate) fn new(
+        chan: Arc<Channel>,
+        max_level: log::LevelFilter,
+        running: Arc<AtomicBool>,
+    ) -> Self {
+        Self {
+            chan,
+            max_level,
+            running,
+        }
     }
 }
 
@@ -273,7 +290,9 @@ impl log::Log for Logger {
         s.write_str("\n").ok();
 
         // Send to consumer thread (transfers ownership)
-        self.chan.push(s);
+        if self.running.load(Ordering::Relaxed) {
+            self.chan.push(s);
+        }
     }
 
     /// Flushes any buffered log records.
@@ -492,7 +511,8 @@ mod tests {
         // Create ring buffer and logger
         let parker = Parker::new();
         let chan = Arc::new(Channel::new(4, parker.unparker().to_owned()));
-        let logger = Logger::new(chan.clone(), log::LevelFilter::Info);
+        let running = Arc::new(AtomicBool::new(true));
+        let logger = Logger::new(chan.clone(), log::LevelFilter::Info, running);
         let running = Arc::new(AtomicBool::new(true));
 
         // Create appender with a Vec as writer (for testing)

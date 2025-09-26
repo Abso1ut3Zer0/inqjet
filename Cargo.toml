@@ -1,6 +1,6 @@
 [package]
 name = "inqjet"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Abso1ut3Zer0"]
 description = "Ultra-fast, low-latency logging for Rust applications"
