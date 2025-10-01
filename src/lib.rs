@@ -626,6 +626,7 @@ fn is_color_enabled(color_mode: ColorMode) -> bool {
 #[cfg(test)]
 mod tests {
     use hdrhistogram::Histogram;
+    use std::io::BufWriter;
     use tracing::Level;
     use tracing_log::LogTracer;
     use tracing_subscriber::fmt;
@@ -671,12 +672,20 @@ mod tests {
     #[ignore]
     #[test]
     fn bench_inqjet() {
+        let tmp = std::env::temp_dir().join("inqjet_bench.log");
+        println!("Writing to {}", tmp.display());
+        let file = std::fs::OpenOptions::new()
+            .truncate(true)
+            .create(true)
+            .write(true)
+            .open(tmp)
+            .expect("Failed to open file");
         let _guard = InqJetBuilder::default()
-            .with_writer(io::stdout())
+            .with_writer(BufWriter::new(file))
             .with_log_level(LevelFilter::Info)
             .with_capacity(2048)
             .with_timeout(None) // Spinning mode for lowest latency
-            .with_color_mode(ColorMode::Auto)
+            .with_color_mode(ColorMode::Never)
             .build()
             .unwrap();
 
