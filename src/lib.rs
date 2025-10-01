@@ -101,6 +101,9 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+use crossbeam_utils::sync::{Parker, Unparker};
+use log::LevelFilter;
+use std::io::IsTerminal;
 use std::{
     io,
     sync::{
@@ -108,9 +111,6 @@ use std::{
         Arc,
     },
 };
-
-use crossbeam_utils::sync::{Parker, Unparker};
-use log::LevelFilter;
 
 use crate::{
     channel::Channel,
@@ -126,6 +126,13 @@ const DEFAULT_CAPACITY: usize = 256;
 
 /// Default parking timeout for responsive shutdown while minimizing CPU usage.
 const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Flag for setting the ansii coloring mode on logs
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
 
 /// RAII guard that manages the logger's background thread and ensures clean shutdown.
 ///
@@ -275,7 +282,8 @@ pub struct InqJetBuilder<W> {
     /// Optional timeout for background thread parking.
     timeout: Option<std::time::Duration>,
 
-    coloring_enabled: bool,
+    /// Coloring mode for the logger
+    color_mode: ColorMode,
 }
 
 impl<W> Default for InqJetBuilder<W> {
@@ -285,7 +293,7 @@ impl<W> Default for InqJetBuilder<W> {
             level: None,
             cap: None,
             timeout: Some(DEFAULT_TIMEOUT),
-            coloring_enabled: true,
+            color_mode: ColorMode::Auto,
         }
     }
 }
@@ -484,8 +492,8 @@ where
     ///
     /// This function allows enabling or disabling coloring functionality
     /// by modifying the `coloring_enabled` property of the instance.
-    pub fn with_coloring_enabled(mut self, coloring_enabled: bool) -> Self {
-        self.coloring_enabled = coloring_enabled;
+    pub fn with_color_mode(mut self, color_mode: ColorMode) -> Self {
+        self.color_mode = color_mode;
         self
     }
 
@@ -562,7 +570,13 @@ where
         let notifier = parker.unparker().to_owned();
         let chan = Arc::new(Channel::new(capacity, parker.unparker().to_owned()));
         let flag = Arc::new(AtomicBool::new(true));
-        let logger = Logger::new(chan.clone(), level, flag.clone(), self.coloring_enabled);
+
+        let logger = Logger::new(
+            chan.clone(),
+            level,
+            flag.clone(),
+            is_color_enabled(self.color_mode),
+        );
         let mut appender = Appender::new(chan, parker, flag.clone(), writer);
         log::set_boxed_logger(Box::new(logger))?;
         log::set_max_level(level);
@@ -581,6 +595,31 @@ where
             flag,
             notifier,
         })
+    }
+}
+
+fn is_color_enabled(color_mode: ColorMode) -> bool {
+    match color_mode {
+        ColorMode::Auto => {
+            // Check TTY
+            if !std::io::stdout().is_terminal() {
+                return false;
+            }
+            // Check NO_COLOR (if set to any value, disable)
+            if std::env::var("NO_COLOR").is_ok() {
+                return false;
+            }
+            // Check TERM
+            if let Ok(term) = std::env::var("TERM") {
+                if term == "dumb" {
+                    return false;
+                }
+            }
+            // You could also check CLICOLOR/CLICOLOR_FORCE here
+            true
+        }
+        ColorMode::Always => true,
+        ColorMode::Never => false,
     }
 }
 
@@ -637,6 +676,7 @@ mod tests {
             .with_log_level(LevelFilter::Info)
             .with_capacity(2048)
             .with_timeout(None) // Spinning mode for lowest latency
+            .with_color_mode(ColorMode::Auto)
             .build()
             .unwrap();
 
