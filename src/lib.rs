@@ -274,6 +274,8 @@ pub struct InqJetBuilder<W> {
 
     /// Optional timeout for background thread parking.
     timeout: Option<std::time::Duration>,
+
+    coloring_enabled: bool,
 }
 
 impl<W> Default for InqJetBuilder<W> {
@@ -283,6 +285,7 @@ impl<W> Default for InqJetBuilder<W> {
             level: None,
             cap: None,
             timeout: Some(DEFAULT_TIMEOUT),
+            coloring_enabled: true,
         }
     }
 }
@@ -477,6 +480,15 @@ where
         self
     }
 
+    /// Sets the coloring_enabled attribute of the object.
+    ///
+    /// This function allows enabling or disabling coloring functionality
+    /// by modifying the `coloring_enabled` property of the instance.
+    pub fn with_coloring_enabled(mut self, coloring_enabled: bool) -> Self {
+        self.coloring_enabled = coloring_enabled;
+        self
+    }
+
     /// Builds and initializes the logger, returning a guard for managing its lifetime.
     ///
     /// This method:
@@ -550,7 +562,7 @@ where
         let notifier = parker.unparker().to_owned();
         let chan = Arc::new(Channel::new(capacity, parker.unparker().to_owned()));
         let flag = Arc::new(AtomicBool::new(true));
-        let logger = Logger::new(chan.clone(), level, flag.clone());
+        let logger = Logger::new(chan.clone(), level, flag.clone(), self.coloring_enabled);
         let mut appender = Appender::new(chan, parker, flag.clone(), writer);
         log::set_boxed_logger(Box::new(logger))?;
         log::set_max_level(level);

@@ -93,6 +93,8 @@ pub struct Logger {
 
     /// Flag to indicate if the logger is still running.
     running: Arc<AtomicBool>,
+
+    coloring_enabled: bool,
 }
 
 impl Drop for Logger {
@@ -135,11 +137,13 @@ impl Logger {
         chan: Arc<Channel>,
         max_level: log::LevelFilter,
         running: Arc<AtomicBool>,
+        coloring_enabled: bool,
     ) -> Self {
         Self {
             chan,
             max_level,
             running,
+            coloring_enabled,
         }
     }
 }
@@ -256,33 +260,56 @@ impl log::Log for Logger {
         // Format with or without line number depending on availability
         match record.line() {
             Some(line) => {
-                write!(
-                    wr,
-                    " {}[{}]{} {}{}:{}{} - {}",
-                    color(level),    // Level color
-                    level,           // Level text (INFO, ERROR, etc.)
-                    RESET,           // Reset color
-                    GRAY,            // Target color
-                    record.target(), // Module path
-                    line,            // Line number
-                    RESET,           // Reset color
-                    record.args()    // User message
-                )
-                .ok();
+                if self.coloring_enabled {
+                    write!(
+                        wr,
+                        " {}[{}]{} {}{}:{}{} {}",
+                        color(level),    // Level color
+                        level,           // Level text (INFO, ERROR, etc.)
+                        RESET,           // Reset color
+                        GRAY,            // Target color
+                        record.target(), // Module path
+                        line,            // Line number
+                        RESET,           // Reset color
+                        record.args()    // User message
+                    )
+                    .ok();
+                } else {
+                    write!(
+                        wr,
+                        " [{}] {}:{} {}",
+                        level,           // Level text (INFO, ERROR, etc.)
+                        record.target(), // Module path
+                        line,            // Line number
+                        record.args()    // User message
+                    )
+                    .ok();
+                }
             }
             None => {
-                write!(
-                    wr,
-                    " {}[{}]{} {}{}{} - {}",
-                    color(level),    // Level color
-                    level,           // Level text
-                    RESET,           // Reset color
-                    GRAY,            // Target color
-                    record.target(), // Module path
-                    RESET,           // Reset color
-                    record.args()    // User message
-                )
-                .ok();
+                if self.coloring_enabled {
+                    write!(
+                        wr,
+                        " {}[{}]{} {}{}{} {}",
+                        color(level),    // Level color
+                        level,           // Level text
+                        RESET,           // Reset color
+                        GRAY,            // Target color
+                        record.target(), // Module path
+                        RESET,           // Reset color
+                        record.args()    // User message
+                    )
+                    .ok();
+                } else {
+                    write!(
+                        wr,
+                        " [{}] {} {}",
+                        level,           // Level text
+                        record.target(), // Module path
+                        record.args()    // User message
+                    )
+                    .ok();
+                }
             }
         }
 
@@ -512,7 +539,7 @@ mod tests {
         let parker = Parker::new();
         let chan = Arc::new(Channel::new(4, parker.unparker().to_owned()));
         let running = Arc::new(AtomicBool::new(true));
-        let logger = Logger::new(chan.clone(), log::LevelFilter::Info, running);
+        let logger = Logger::new(chan.clone(), log::LevelFilter::Info, running, true);
         let running = Arc::new(AtomicBool::new(true));
 
         // Create appender with a Vec as writer (for testing)
@@ -539,7 +566,47 @@ mod tests {
         // Should contain our message
         assert!(output_str.contains("[INFO]"));
         assert!(output_str.contains("test_module:"));
-        assert!(output_str.contains(" - Test message"));
+        assert!(output_str.contains(" Test message"));
+        assert!(output_str.ends_with("\n"));
+
+        // Should have timestamp at the beginning
+        assert!(output_str.contains("T")); // ISO8601 format has T between date and time
+    }
+
+    #[test]
+    fn test_logger_appender_integration_no_coloring() {
+        // Create ring buffer and logger
+        let parker = Parker::new();
+        let chan = Arc::new(Channel::new(4, parker.unparker().to_owned()));
+        let running = Arc::new(AtomicBool::new(true));
+        let logger = Logger::new(chan.clone(), log::LevelFilter::Info, running, false);
+        let running = Arc::new(AtomicBool::new(true));
+
+        // Create appender with a Vec as writer (for testing)
+        let output = Vec::new();
+        let mut appender = Appender::new(chan, parker, running, output);
+
+        // Log a message directly using the Log trait
+        logger.log(
+            &Record::builder()
+                .args(format_args!("Test message"))
+                .level(Level::Info)
+                .target("test_module")
+                .line(Some(23))
+                .build(),
+        );
+
+        // Process the log
+        appender.block_on_append(None).expect("failed to process");
+
+        // Check output
+        let output_str = String::from_utf8(appender.wr.clone()).expect("invalid utf8");
+        println!("Output: {}", output_str);
+
+        // Should contain our message
+        assert!(output_str.contains("[INFO]"));
+        assert!(output_str.contains("test_module:"));
+        assert!(output_str.contains(" Test message"));
         assert!(output_str.ends_with("\n"));
 
         // Should have timestamp at the beginning
