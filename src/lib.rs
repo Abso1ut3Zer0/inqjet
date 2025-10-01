@@ -101,6 +101,9 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+use crossbeam_utils::sync::{Parker, Unparker};
+use log::LevelFilter;
+use std::io::IsTerminal;
 use std::{
     io,
     sync::{
@@ -108,9 +111,6 @@ use std::{
         Arc,
     },
 };
-
-use crossbeam_utils::sync::{Parker, Unparker};
-use log::LevelFilter;
 
 use crate::{
     channel::Channel,
@@ -126,6 +126,13 @@ const DEFAULT_CAPACITY: usize = 256;
 
 /// Default parking timeout for responsive shutdown while minimizing CPU usage.
 const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5);
+
+/// Flag for setting the ansii coloring mode on logs
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
 
 /// RAII guard that manages the logger's background thread and ensures clean shutdown.
 ///
@@ -274,6 +281,9 @@ pub struct InqJetBuilder<W> {
 
     /// Optional timeout for background thread parking.
     timeout: Option<std::time::Duration>,
+
+    /// Coloring mode for the logger
+    color_mode: ColorMode,
 }
 
 impl<W> Default for InqJetBuilder<W> {
@@ -283,6 +293,7 @@ impl<W> Default for InqJetBuilder<W> {
             level: None,
             cap: None,
             timeout: Some(DEFAULT_TIMEOUT),
+            color_mode: ColorMode::Auto,
         }
     }
 }
@@ -477,6 +488,15 @@ where
         self
     }
 
+    /// Sets the coloring_enabled attribute of the object.
+    ///
+    /// This function allows enabling or disabling coloring functionality
+    /// by modifying the `coloring_enabled` property of the instance.
+    pub fn with_color_mode(mut self, color_mode: ColorMode) -> Self {
+        self.color_mode = color_mode;
+        self
+    }
+
     /// Builds and initializes the logger, returning a guard for managing its lifetime.
     ///
     /// This method:
@@ -550,7 +570,13 @@ where
         let notifier = parker.unparker().to_owned();
         let chan = Arc::new(Channel::new(capacity, parker.unparker().to_owned()));
         let flag = Arc::new(AtomicBool::new(true));
-        let logger = Logger::new(chan.clone(), level, flag.clone());
+
+        let logger = Logger::new(
+            chan.clone(),
+            level,
+            flag.clone(),
+            is_color_enabled(self.color_mode),
+        );
         let mut appender = Appender::new(chan, parker, flag.clone(), writer);
         log::set_boxed_logger(Box::new(logger))?;
         log::set_max_level(level);
@@ -572,9 +598,35 @@ where
     }
 }
 
+fn is_color_enabled(color_mode: ColorMode) -> bool {
+    match color_mode {
+        ColorMode::Auto => {
+            // Check TTY
+            if !std::io::stdout().is_terminal() {
+                return false;
+            }
+            // Check NO_COLOR (if set to any value, disable)
+            if std::env::var("NO_COLOR").is_ok() {
+                return false;
+            }
+            // Check TERM
+            if let Ok(term) = std::env::var("TERM") {
+                if term == "dumb" {
+                    return false;
+                }
+            }
+            // You could also check CLICOLOR/CLICOLOR_FORCE here
+            true
+        }
+        ColorMode::Always => true,
+        ColorMode::Never => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use hdrhistogram::Histogram;
+    use std::io::BufWriter;
     use tracing::Level;
     use tracing_log::LogTracer;
     use tracing_subscriber::fmt;
@@ -620,11 +672,20 @@ mod tests {
     #[ignore]
     #[test]
     fn bench_inqjet() {
+        let tmp = std::env::temp_dir().join("inqjet_bench.log");
+        println!("Writing to {}", tmp.display());
+        let file = std::fs::OpenOptions::new()
+            .truncate(true)
+            .create(true)
+            .write(true)
+            .open(tmp)
+            .expect("Failed to open file");
         let _guard = InqJetBuilder::default()
-            .with_writer(io::stdout())
+            .with_writer(BufWriter::new(file))
             .with_log_level(LevelFilter::Info)
             .with_capacity(2048)
             .with_timeout(None) // Spinning mode for lowest latency
+            .with_color_mode(ColorMode::Never)
             .build()
             .unwrap();
 
