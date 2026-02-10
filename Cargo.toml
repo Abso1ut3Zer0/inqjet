@@ -13,11 +13,10 @@ keywords = ["logging", "performance", "low-latency", "async", "lock-free"]
 categories = ["development-tools::debugging"]
 
 [dependencies]
-crossbeam-queue = "0.3.12"
 crossbeam-utils = "0.8.21"
 log = { version = "0.4.27", features = ["std"] }
+nexus-logbuf = { path = "../nexus/nexus-logbuf" }
 thiserror = "2.0.12"
-time = { version = "0.3.41", features = ["formatting", "macros"] }
 
 [dev-dependencies]
 hdrhistogram = "7.5.4"

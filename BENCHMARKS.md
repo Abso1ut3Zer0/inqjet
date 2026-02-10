@@ -290,6 +290,16 @@ Measured on: (run `lscpu | grep "Model name"` to record your CPU)
 | Duration | 0.36s |
 | Throughput | 2,762,265 msg/s |
 | Avg latency | 0.36 us/msg |
+| Avg message size | ~81 bytes |
+| Byte throughput | ~224 MB/s |
+
+**Not close to 1 GB/s.** The bottleneck is `format_args!` processing on the
+producer, not transport. nexus-logbuf SPSC can push 20.7 GB/s of raw bytes —
+~92x headroom. The transport is waiting on the formatter.
+
+Path to GB/s: Phase 5 POD path at 50-100ns/msg → 10-20M msg/s → 0.8-1.6 GB/s
+of raw bytes through the ring buffer (no formatting on producer). For raw
+archival (dump bytes, format offline), this approaches transport-limited speed.
 
 ---
 

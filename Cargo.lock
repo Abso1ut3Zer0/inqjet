@@ -51,15 +51,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "crossbeam-queue"
-version = "0.3.12"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f58bbc28f91df819d0aa2a2c00cd19754769c2fad90579b3592b1c9ba7a3115"
-dependencies = [
- "crossbeam-utils",
-]
-
-[[package]]
 name = "crossbeam-utils"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -102,12 +93,11 @@ dependencies = [
 name = "inqjet"
 version = "0.2.0"
 dependencies = [
- "crossbeam-queue",
  "crossbeam-utils",
  "hdrhistogram",
  "log",
+ "nexus-logbuf",
  "thiserror 2.0.12",
- "time",
  "tracing",
  "tracing-appender",
  "tracing-log",
@@ -151,6 +141,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fa76a2c86f704bdb222d66965fb3d63269ce38518b83cb0575fca855ebb6316"
 dependencies = [
  "adler2",
+]
+
+[[package]]
+name = "nexus-logbuf"
+version = "1.0.1"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]

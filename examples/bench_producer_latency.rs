@@ -390,7 +390,7 @@ fn main() {
     let _guard = InqJetBuilder::default()
         .with_writer(NullWriter)
         .with_log_level(LevelFilter::Info)
-        .with_capacity(65_536)
+        .with_buffer_size(65_536)
         .with_timeout(None)
         .with_color_mode(ColorMode::Never)
         .build()
@@ -411,7 +411,10 @@ fn main() {
     print_header();
     print_hist("static &str (no args)", &bench_static_message());
     print_hist("single u64 (Display)", &bench_single_u64());
-    print_hist("single f64 {:.4} (precision)", &bench_single_f64_precision());
+    print_hist(
+        "single f64 {:.4} (precision)",
+        &bench_single_f64_precision(),
+    );
     print_hist("single &str arg", &bench_str_ref());
     print_hist("single String arg", &bench_string_owned());
     print_hist("4x mixed primitives", &bench_multi_primitives());
