@@ -24,7 +24,7 @@
 
 use std::cell::{RefCell, UnsafeCell};
 use std::fmt::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crossbeam_utils::sync::Unparker;
@@ -49,6 +49,25 @@ pub(crate) struct LoggerState {
 }
 
 pub(crate) static LOGGER: OnceLock<LoggerState> = OnceLock::new();
+
+/// Fast level gate for standalone macros. One atomic load before
+/// `format_args!()` evaluates its arguments.
+pub(crate) static MAX_LEVEL: AtomicU8 = AtomicU8::new(0); // 0 = Off
+
+pub(crate) fn log_enabled(level: u8) -> bool {
+    level <= MAX_LEVEL.load(Ordering::Relaxed)
+}
+
+pub(crate) fn level_filter_to_u8(lf: LevelFilter) -> u8 {
+    match lf {
+        LevelFilter::Off => 0,
+        LevelFilter::Error => 1,
+        LevelFilter::Warn => 2,
+        LevelFilter::Info => 3,
+        LevelFilter::Debug => 4,
+        LevelFilter::Trace => 5,
+    }
+}
 
 thread_local! {
     /// Thread-local producer clone. RefCell provides re-entrancy detection:
@@ -82,6 +101,75 @@ fn level_to_u8(level: log::Level) -> u8 {
     }
 }
 
+/// Core log path shared by `Logger::log()` and standalone macros.
+///
+/// Level gating is the caller's responsibility — `Logger::log()` checks
+/// against `state.max_level`, standalone macros check `MAX_LEVEL` in the
+/// macro body before `format_args!()` evaluates.
+pub(crate) fn log_impl(level: u8, target: &str, line: u32, args: std::fmt::Arguments<'_>) {
+    let state = match LOGGER.get() {
+        Some(s) => s,
+        None => return,
+    };
+
+    if !state.running.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let timestamp_ns = format::snap_timestamp();
+
+    TLS_PRODUCER.with(|producer_cell| {
+        let mut producer_opt = producer_cell
+            .try_borrow_mut()
+            .expect("re-entrant logging detected: Display/Debug impls must not call log macros");
+
+        let producer = producer_opt.get_or_insert_with(|| state.source_producer.clone());
+
+        TLS_BUF.with(|buf_cell| {
+            // SAFETY: TLS is single-threaded. Re-entrancy is guarded by
+            // TLS_PRODUCER's RefCell borrow above — a re-entrant log call
+            // would panic at try_borrow_mut() before reaching here.
+            let buf = unsafe { &mut *buf_cell.get() };
+            buf.clear();
+
+            write!(buf, "{}", args).ok();
+
+            let total_size = record::standard_record_size(target.len(), buf.len());
+
+            let header = RecordHeader {
+                timestamp_ns,
+                formatter: format::standard_format_fn,
+                level,
+                _pad: [0u8; 7],
+            };
+
+            loop {
+                match producer.try_claim(total_size) {
+                    Ok(mut claim) => {
+                        record::write_header(&mut claim, &header);
+                        record::write_standard_payload(
+                            &mut claim[HEADER_SIZE..],
+                            line,
+                            target,
+                            buf.as_str(),
+                        );
+                        claim.commit();
+                        state.unparker.unpark();
+                        break;
+                    }
+                    Err(nexus_logbuf::TryClaimError::Full) => {
+                        state.unparker.unpark();
+                        std::hint::spin_loop();
+                    }
+                    Err(nexus_logbuf::TryClaimError::ZeroLength) => {
+                        unreachable!("record size is always > 0");
+                    }
+                }
+            }
+        });
+    });
+}
+
 /// Logger that implements `log::Log` by writing records to the logbuf.
 pub(crate) struct Logger;
 
@@ -103,65 +191,12 @@ impl log::Log for Logger {
             return;
         }
 
-        if !state.running.load(Ordering::Relaxed) {
-            return;
-        }
-
-        let timestamp_ns = format::snap_timestamp();
-        let level = level_to_u8(record.level());
-        let target = record.target();
-        let line = record.line().unwrap_or(0);
-
-        TLS_PRODUCER.with(|producer_cell| {
-            let mut producer_opt = producer_cell.try_borrow_mut().expect(
-                "re-entrant logging detected: Display/Debug impls must not call log macros",
-            );
-
-            let producer = producer_opt.get_or_insert_with(|| state.source_producer.clone());
-
-            TLS_BUF.with(|buf_cell| {
-                // SAFETY: TLS is single-threaded. Re-entrancy is guarded by
-                // TLS_PRODUCER's RefCell borrow above — a re-entrant log call
-                // would panic at try_borrow_mut() before reaching here.
-                let buf = unsafe { &mut *buf_cell.get() };
-                buf.clear();
-
-                write!(buf, "{}", record.args()).ok();
-
-                let total_size = record::standard_record_size(target.len(), buf.len());
-
-                let header = RecordHeader {
-                    timestamp_ns,
-                    formatter: format::standard_format_fn,
-                    level,
-                    _pad: [0u8; 7],
-                };
-
-                loop {
-                    match producer.try_claim(total_size) {
-                        Ok(mut claim) => {
-                            record::write_header(&mut claim, &header);
-                            record::write_standard_payload(
-                                &mut claim[HEADER_SIZE..],
-                                line,
-                                target,
-                                buf.as_str(),
-                            );
-                            claim.commit();
-                            state.unparker.unpark();
-                            break;
-                        }
-                        Err(nexus_logbuf::TryClaimError::Full) => {
-                            state.unparker.unpark();
-                            std::hint::spin_loop();
-                        }
-                        Err(nexus_logbuf::TryClaimError::ZeroLength) => {
-                            unreachable!("record size is always > 0");
-                        }
-                    }
-                }
-            });
-        });
+        log_impl(
+            level_to_u8(record.level()),
+            record.target(),
+            record.line().unwrap_or(0),
+            *record.args(),
+        );
     }
 
     fn flush(&self) {}

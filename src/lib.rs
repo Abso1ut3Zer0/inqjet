@@ -8,15 +8,19 @@
 //!
 //! ```rust, ignore
 //! use inqjet::InqJetBuilder;
-//! use log::{info, error, LevelFilter};
+//! use log::LevelFilter;
 //!
 //! let _guard = InqJetBuilder::default()
 //!     .with_writer(std::io::stdout())
 //!     .with_log_level(LevelFilter::Info)
 //!     .build()?;
 //!
-//! info!("Server started on port {}", 8080);
-//! error!("Connection failed: {}", "timeout");
+//! // Standalone macros — bypass the log facade, direct to logbuf:
+//! inqjet::info!("Server started on port {}", 8080);
+//! inqjet::error!("Connection failed: {}", "timeout");
+//!
+//! // log crate macros still work via the bridge:
+//! log::info!("This also works");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
@@ -35,6 +39,142 @@ pub(crate) mod consumer;
 pub(crate) mod format;
 pub(crate) mod logger;
 pub(crate) mod record;
+
+// -- Standalone macro support ------------------------------------------------
+
+/// Level gate for standalone macros. Not public API.
+#[doc(hidden)]
+#[inline]
+pub fn __log_enabled(level: u8) -> bool {
+    logger::log_enabled(level)
+}
+
+/// Log entry point for standalone macros. Not public API.
+#[doc(hidden)]
+pub fn __log_impl(level: u8, target: &str, line: u32, args: std::fmt::Arguments<'_>) {
+    logger::log_impl(level, target, line, args)
+}
+
+/// Log at the ERROR level.
+///
+/// Bypasses the `log` facade — writes directly to the logbuf.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// inqjet::error!("connection lost");
+/// inqjet::error!("failed after {} retries", count);
+/// inqjet::error!(target: "net::tcp", "timeout on fd {}", fd);
+/// ```
+#[macro_export]
+macro_rules! error {
+    (target: $target:expr, $($arg:tt)+) => {
+        if $crate::__log_enabled(1) {
+            $crate::__log_impl(1, $target, line!(), format_args!($($arg)+))
+        }
+    };
+    ($($arg:tt)+) => {
+        if $crate::__log_enabled(1) {
+            $crate::__log_impl(1, module_path!(), line!(), format_args!($($arg)+))
+        }
+    };
+}
+
+/// Log at the WARN level.
+///
+/// Bypasses the `log` facade — writes directly to the logbuf.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// inqjet::warn!("queue depth high: {}", depth);
+/// inqjet::warn!(target: "engine", "slow tick: {}us", elapsed);
+/// ```
+#[macro_export]
+macro_rules! warn {
+    (target: $target:expr, $($arg:tt)+) => {
+        if $crate::__log_enabled(2) {
+            $crate::__log_impl(2, $target, line!(), format_args!($($arg)+))
+        }
+    };
+    ($($arg:tt)+) => {
+        if $crate::__log_enabled(2) {
+            $crate::__log_impl(2, module_path!(), line!(), format_args!($($arg)+))
+        }
+    };
+}
+
+/// Log at the INFO level.
+///
+/// Bypasses the `log` facade — writes directly to the logbuf.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// inqjet::info!("server started on port {}", port);
+/// inqjet::info!(target: "app::init", "ready");
+/// ```
+#[macro_export]
+macro_rules! info {
+    (target: $target:expr, $($arg:tt)+) => {
+        if $crate::__log_enabled(3) {
+            $crate::__log_impl(3, $target, line!(), format_args!($($arg)+))
+        }
+    };
+    ($($arg:tt)+) => {
+        if $crate::__log_enabled(3) {
+            $crate::__log_impl(3, module_path!(), line!(), format_args!($($arg)+))
+        }
+    };
+}
+
+/// Log at the DEBUG level.
+///
+/// Bypasses the `log` facade — writes directly to the logbuf.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// inqjet::debug!("state: {:?}", state);
+/// inqjet::debug!(target: "parser", "token: {}", tok);
+/// ```
+#[macro_export]
+macro_rules! debug {
+    (target: $target:expr, $($arg:tt)+) => {
+        if $crate::__log_enabled(4) {
+            $crate::__log_impl(4, $target, line!(), format_args!($($arg)+))
+        }
+    };
+    ($($arg:tt)+) => {
+        if $crate::__log_enabled(4) {
+            $crate::__log_impl(4, module_path!(), line!(), format_args!($($arg)+))
+        }
+    };
+}
+
+/// Log at the TRACE level.
+///
+/// Bypasses the `log` facade — writes directly to the logbuf.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// inqjet::trace!("enter process_order");
+/// inqjet::trace!(target: "hot", "tick {}", seq);
+/// ```
+#[macro_export]
+macro_rules! trace {
+    (target: $target:expr, $($arg:tt)+) => {
+        if $crate::__log_enabled(5) {
+            $crate::__log_impl(5, $target, line!(), format_args!($($arg)+))
+        }
+    };
+    ($($arg:tt)+) => {
+        if $crate::__log_enabled(5) {
+            $crate::__log_impl(5, module_path!(), line!(), format_args!($($arg)+))
+        }
+    };
+}
 
 /// Default logbuf capacity in bytes (64KB).
 const DEFAULT_CAPACITY: usize = 65_536;
@@ -91,9 +231,6 @@ pub enum InqJetBuilderError {
 
     #[error("io error: {0}")]
     IoError(#[from] io::Error),
-
-    #[error("{0}")]
-    SetLoggerError(#[from] log::SetLoggerError),
 }
 
 /// Builder for configuring and creating an InqJet logger.
@@ -199,7 +336,11 @@ where
             running: running.clone(),
         });
 
-        log::set_boxed_logger(Box::new(Logger))?;
+        logger::MAX_LEVEL.store(logger::level_filter_to_u8(level), Ordering::Release);
+
+        // Best-effort: if another logger is already registered the standalone
+        // macros still work — they bypass the log facade entirely.
+        let _ = log::set_boxed_logger(Box::new(Logger));
         log::set_max_level(level);
 
         Ok(InqJetGuard {
