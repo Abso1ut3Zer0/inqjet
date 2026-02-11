@@ -95,6 +95,7 @@ version = "0.2.0"
 dependencies = [
  "crossbeam-utils",
  "hdrhistogram",
+ "inqjet-macros",
  "log",
  "nexus-logbuf",
  "thiserror 2.0.12",
@@ -102,6 +103,15 @@ dependencies = [
  "tracing-appender",
  "tracing-log",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "inqjet-macros"
+version = "0.2.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

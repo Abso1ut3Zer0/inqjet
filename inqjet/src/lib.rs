@@ -38,7 +38,10 @@ use crate::logger::{Logger, LoggerState, LOGGER};
 pub(crate) mod consumer;
 pub(crate) mod format;
 pub(crate) mod logger;
+pub mod pod;
 pub(crate) mod record;
+
+pub use pod::InqJetPod;
 
 // -- Standalone macro support ------------------------------------------------
 
