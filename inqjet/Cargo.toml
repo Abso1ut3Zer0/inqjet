@@ -1,0 +1,32 @@
+[package]
+name = "inqjet"
+version = "1.0.0"
+edition = "2024"
+authors = ["Abso1ut3Zer0"]
+description = "Ultra-fast, low-latency logging for Rust applications"
+documentation = "https://docs.rs/inqjet"
+homepage = "https://github.com/Abso1ut3Zer0/inqjet"
+repository = "https://github.com/Abso1ut3Zer0/inqjet"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["logging", "performance", "low-latency", "async", "lock-free"]
+categories = ["development-tools::debugging"]
+
+[features]
+default = ["log-compat"]
+log-compat = ["dep:log"]
+
+[dependencies]
+crossbeam-utils = "0.8.21"
+log = { version = "0.4.27", features = ["std"], optional = true }
+inqjet-macros = { path = "../inqjet-macros" }
+nexus-logbuf = "1.0.1"
+thiserror = "2.0.12"
+
+[dev-dependencies]
+hdrhistogram = "7.5.4"
+log = "0.4.27"
+tracing = { version = "0.1.40", features = ["log"] }
+tracing-appender = "0.2.3"
+tracing-log = "0.2.0"
+tracing-subscriber = "0.3.18"

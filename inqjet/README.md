@@ -20,7 +20,7 @@ independent of message complexity.
 | Debug `{:?}` Vec | 0.46us | 1.20us | 2.6x |
 | Verbose 6-arg | 0.21us | 1.31us | 6.2x |
 
-See [BENCHMARKS.md](BENCHMARKS.md) for full results including tail latency
+See [BENCHMARKS.md](../BENCHMARKS.md) for full results including tail latency
 and methodology.
 
 ## Quick Start
