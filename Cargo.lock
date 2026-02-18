@@ -91,7 +91,7 @@ dependencies = [
 
 [[package]]
 name = "inqjet"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "crossbeam-utils",
  "hdrhistogram",
@@ -107,7 +107,7 @@ dependencies = [
 
 [[package]]
 name = "inqjet-macros"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "proc-macro2",
  "quote",
