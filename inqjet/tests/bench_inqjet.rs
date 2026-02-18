@@ -136,14 +136,9 @@ fn bench_inqjet() {
         .with_timeout(None) // busy-spin consumer
         .with_color_mode(ColorMode::Never);
 
-    let mut simple_archive = builder.add_archive::<SimpleTag>(
-        BufWriter::new(archive_file),
-        1 << 20,
-    );
-    let mut venue_archive = builder.add_archive::<VenueEvent>(
-        std::io::sink(),
-        1 << 20,
-    );
+    let mut simple_archive =
+        builder.add_archive::<SimpleTag>(BufWriter::new(archive_file), 1 << 20);
+    let mut venue_archive = builder.add_archive::<VenueEvent>(std::io::sink(), 1 << 20);
 
     let _guard = builder.build().unwrap();
 
@@ -245,7 +240,10 @@ fn bench_inqjet() {
     // 13. Composite tag + small payload
     bench!("archive_venue_small", archive_results, n, |i| {
         venue_archive.write(
-            VenueEvent { venue: "BINANCE", direction: Direction::Inbound },
+            VenueEvent {
+                venue: "BINANCE",
+                direction: Direction::Inbound,
+            },
             small_payload,
         )
     });
@@ -253,10 +251,16 @@ fn bench_inqjet() {
     // 14. Composite tag + FIX-sized payload (~140 bytes)
     bench!("archive_venue_fix", archive_results, n, |i| {
         venue_archive.write(
-            VenueEvent { venue: "BINANCE", direction: Direction::Outbound },
+            VenueEvent {
+                venue: "BINANCE",
+                direction: Direction::Outbound,
+            },
             fix_payload,
         )
     });
 
-    print_table("InqJet Archive Results (producer-side latency)", &archive_results);
+    print_table(
+        "InqJet Archive Results (producer-side latency)",
+        &archive_results,
+    );
 }
