@@ -20,7 +20,7 @@ log-compat = ["dep:log"]
 crossbeam-utils = "0.8.21"
 log = { version = "0.4.27", features = ["std"], optional = true }
 inqjet-macros = { path = "../inqjet-macros" }
-nexus-logbuf = { path = "../../nexus/nexus-logbuf" }
+nexus-logbuf = "1.0.1"
 thiserror = "2.0.12"
 
 [dev-dependencies]
