@@ -1,14 +1,14 @@
 [package]
 name = "inqjet-macros"
-version = "1.0.0"
-edition = "2024"
-rust-version = "1.85"
-authors = ["Abso1ut3Zer0"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+license.workspace = true
 description = "Proc macros for InqJet logging library"
 documentation = "https://docs.rs/inqjet-macros"
-homepage = "https://github.com/Abso1ut3Zer0/inqjet"
-repository = "https://github.com/Abso1ut3Zer0/inqjet"
-license = "MIT OR Apache-2.0"
 
 [lib]
 proc-macro = true
