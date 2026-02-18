@@ -7,8 +7,7 @@
 //! # Quick Start
 //!
 //! ```rust, ignore
-//! use inqjet::InqJetBuilder;
-//! use log::LevelFilter;
+//! use inqjet::{InqJetBuilder, LevelFilter};
 //!
 //! let _guard = InqJetBuilder::default()
 //!     .with_writer(std::io::stdout())
@@ -19,7 +18,7 @@
 //! inqjet::info!("Server started on port {}", 8080);
 //! inqjet::error!("Connection failed: {}", "timeout");
 //!
-//! // log crate macros still work via the bridge:
+//! // log crate macros still work via the bridge (with `log-compat` feature):
 //! log::info!("This also works");
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
@@ -300,6 +299,31 @@ pub enum ColorMode {
     Never,
 }
 
+/// Controls producer behavior when the ring buffer is full.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BackpressureMode {
+    /// Exponential backoff via `crossbeam::Backoff::snooze()`.
+    ///
+    /// Spins briefly, then yields. Guarantees delivery at the cost of
+    /// variable producer latency under pressure. This is the default.
+    Backoff,
+    /// Drop the message and return immediately.
+    ///
+    /// Lowest and most predictable producer latency. Use when bounded
+    /// latency matters more than log completeness.
+    Drop,
+}
+
+/// Updates the global log level at runtime.
+///
+/// Takes effect immediately for all subsequent log calls. Existing
+/// in-flight records are not affected.
+pub fn set_level(level: LevelFilter) {
+    logger::MAX_LEVEL.store(level.as_u8(), Ordering::Relaxed);
+    #[cfg(feature = "log-compat")]
+    log::set_max_level(level.into());
+}
+
 /// RAII guard that manages the logger's background archiver thread.
 ///
 /// When dropped:
@@ -353,6 +377,7 @@ pub struct InqJetBuilder<W> {
     cap: Option<usize>,
     timeout: Option<std::time::Duration>,
     color_mode: ColorMode,
+    backpressure: BackpressureMode,
 }
 
 impl<W> Default for InqJetBuilder<W> {
@@ -363,6 +388,7 @@ impl<W> Default for InqJetBuilder<W> {
             cap: None,
             timeout: Some(DEFAULT_TIMEOUT),
             color_mode: ColorMode::Auto,
+            backpressure: BackpressureMode::Backoff,
         }
     }
 }
@@ -407,6 +433,14 @@ where
         self
     }
 
+    /// Sets the backpressure strategy when the ring buffer is full.
+    ///
+    /// Default: [`BackpressureMode::Backoff`].
+    pub fn with_backpressure(mut self, mode: BackpressureMode) -> Self {
+        self.backpressure = mode;
+        self
+    }
+
     /// Builds the logger, spawns the archiver thread, and registers
     /// as the global `log` crate logger.
     ///
@@ -441,6 +475,7 @@ where
             unparker: unparker.clone(),
             #[cfg(feature = "log-compat")]
             max_level: level,
+            backpressure: self.backpressure,
             running: running.clone(),
         });
 

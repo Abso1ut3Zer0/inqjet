@@ -1,4 +1,7 @@
-//! InqJet benchmarks: log::info! bridge vs inqjet::info! hot-path.
+//! InqJet comprehensive scenario benchmarks.
+//!
+//! Measures producer-side latency across diverse message types and argument
+//! combinations. Run alongside `bench_tracing` for comparison.
 //!
 //! Run with:
 //! ```bash
@@ -6,127 +9,169 @@
 //! ```
 
 use std::io::BufWriter;
+use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
 use inqjet::{ColorMode, InqJetBuilder, LevelFilter};
 
-fn print_histogram_stats(name: &str, hist: &Histogram<u64>) {
-    println!("\n=== {} Performance Profile ===", name);
-    println!("Count: {}", hist.len());
-    println!("Min: {:>8.2}us", hist.min() as f64 / 1000.0);
-    println!("Mean: {:>7.2}us", hist.mean() / 1000.0);
-    println!("Max: {:>8.2}us", hist.max() as f64 / 1000.0);
-    println!("StdDev: {:>5.2}us", hist.stdev() / 1000.0);
-    println!();
-    println!("Percentiles:");
+const USERS: &[&str] = &["alice", "bob", "charlie", "diana", "eve"];
+const PATHS: &[&str] = &["/api/v1/users", "/api/v1/orders", "/health", "/api/v2/data"];
+const IPS: &[&str] = &["10.0.1.1", "192.168.1.42", "172.16.0.100", "10.0.2.55"];
+const ACTIONS: &[&str] = &["read", "write", "delete", "update"];
+
+fn make_sessions(n: usize) -> Vec<String> {
+    (0..n).map(|i| format!("sess-{:08x}", i * 7 + 13)).collect()
+}
+
+macro_rules! bench {
+    ($name:expr, $results:ident, $n:expr, |$i:ident| $body:expr) => {{
+        for $i in 0..200usize {
+            let _ = $i;
+            $body;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+
+        let mut hist = Histogram::<u64>::new_with_bounds(1, 60_000_000, 3).unwrap();
+        for $i in 0..$n {
+            let start = Instant::now();
+            $body;
+            hist.record(start.elapsed().as_nanos() as u64).unwrap();
+            if $i % 1000 == 0 {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(200));
+        $results.push(($name, hist));
+    }};
+}
+
+fn print_table(header: &str, results: &[(&str, Histogram<u64>)]) {
+    println!("\n{header}");
+    println!("{}", "=".repeat(header.len()));
+    println!("100,000 iterations per scenario | 1MB ring buffer | busy-spin consumer\n");
     println!(
-        "  50th: {:>6.2}us",
-        hist.value_at_quantile(0.50) as f64 / 1000.0
+        "{:<24} {:>8} {:>8} {:>8} {:>8} {:>8}",
+        "Scenario", "p50", "p90", "p99", "p99.9", "max"
     );
     println!(
-        "  90th: {:>6.2}us",
-        hist.value_at_quantile(0.90) as f64 / 1000.0
+        "{:-<24} {:->8} {:->8} {:->8} {:->8} {:->8}",
+        "", "", "", "", "", ""
     );
-    println!(
-        "  95th: {:>6.2}us",
-        hist.value_at_quantile(0.95) as f64 / 1000.0
-    );
-    println!(
-        "  99th: {:>6.2}us",
-        hist.value_at_quantile(0.99) as f64 / 1000.0
-    );
-    println!(
-        " 99.9th: {:>5.2}us",
-        hist.value_at_quantile(0.999) as f64 / 1000.0
-    );
-    println!(
-        " 99.99th: {:>4.2}us",
-        hist.value_at_quantile(0.9999) as f64 / 1000.0
-    );
+    for (name, hist) in results {
+        println!(
+            "{:<24} {:>6.2}us {:>6.2}us {:>6.2}us {:>6.2}us {:>6.2}us",
+            name,
+            hist.value_at_quantile(0.50) as f64 / 1000.0,
+            hist.value_at_quantile(0.90) as f64 / 1000.0,
+            hist.value_at_quantile(0.99) as f64 / 1000.0,
+            hist.value_at_quantile(0.999) as f64 / 1000.0,
+            hist.max() as f64 / 1000.0,
+        );
+    }
     println!();
 }
 
 #[ignore]
 #[test]
 fn bench_inqjet() {
-    let tmp = std::env::temp_dir().join("inqjet_bench.log");
-    println!("Writing to {}", tmp.display());
+    let tmp = std::env::temp_dir().join("inqjet_scenario_bench.log");
     let file = std::fs::OpenOptions::new()
         .truncate(true)
         .create(true)
         .write(true)
-        .open(tmp)
-        .expect("Failed to open file");
+        .open(&tmp)
+        .unwrap();
     let _guard = InqJetBuilder::default()
         .with_writer(BufWriter::new(file))
-        .with_log_level(LevelFilter::Info)
-        .with_buffer_size(262_144) // 256KB ring buffer
-        .with_timeout(None)
+        .with_log_level(LevelFilter::Trace)
+        .with_buffer_size(1 << 20) // 1MB ring buffer
+        .with_timeout(None) // busy-spin consumer
         .with_color_mode(ColorMode::Never)
         .build()
         .unwrap();
 
-    std::thread::sleep(std::time::Duration::from_millis(100));
+    std::thread::sleep(Duration::from_millis(200));
 
-    let n = 100_000;
+    let sessions = make_sessions(256);
+    let data: Vec<u32> = vec![1, 2, 3, 4, 5];
+    let n = 100_000usize;
+    let mut results: Vec<(&str, Histogram<u64>)> = Vec::new();
 
-    // -- log::info! bridge path ------------------------------------------------
+    // 1. Static message — no format args, minimal payload
+    bench!("static_msg", results, n, |i| {
+        inqjet::info!("health check passed")
+    });
 
-    {
-        let mut hist = Histogram::<u64>::new_with_bounds(1, 60 * 1000 * 1000, 3).unwrap();
+    // 2. Single integer — Pod memcpy path (8 bytes)
+    bench!("single_int", results, n, |i| {
+        inqjet::info!("processed request in {}ms", i as u64)
+    });
 
-        println!("Warming up log::info! bridge...");
-        for i in 0..100 {
-            log::info!("warmup message {}", i);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    // 3. Single &str — Tier 1.5 direct-copy (length-prefixed)
+    bench!("single_str", results, n, |i| {
+        inqjet::info!("user {} connected", USERS[i % USERS.len()])
+    });
 
-        println!(
-            "Starting log::info! bridge benchmark with {} iterations...",
-            n
-        );
-        for i in 0..n {
-            let start = std::time::Instant::now();
-            log::info!("logging to inqjet logger! msg number: {}", i);
-            let elapsed = start.elapsed();
-            hist.record(elapsed.as_nanos() as u64).unwrap();
+    // 4. Single owned String — Tier 1.5 direct-copy
+    bench!("single_string", results, n, |i| {
+        inqjet::info!("session {}", sessions[i % sessions.len()])
+    });
 
-            if i % 1000 == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-        }
+    // 5. Realistic 4-arg request log — mixed &str and u32
+    bench!("realistic_4arg", results, n, |i| {
+        inqjet::info!(
+            "{} {} from {} status {}",
+            "GET",
+            PATHS[i % PATHS.len()],
+            IPS[i % IPS.len()],
+            200u32
+        )
+    });
 
-        std::thread::sleep(std::time::Duration::from_millis(200));
-        print_histogram_stats("InqJet (log::info! bridge)", &hist);
-    }
+    // 6. Three POD fields — order-like (u64 + f64 + i64 = 24 bytes)
+    bench!("pod_triple", results, n, |i| {
+        inqjet::info!("order id={} price={} qty={}", i as u64, 99.95f64, 100i64)
+    });
 
-    // -- inqjet::info! hot-path ------------------------------------------------
+    // 7. Float with precision spec — Pod on producer, {:.4} on consumer
+    bench!("float_precision", results, n, |i| {
+        inqjet::info!("latency: {:.4}ms", (i as f64) * 0.001 + 0.5)
+    });
 
-    {
-        let mut hist = Histogram::<u64>::new_with_bounds(1, 60 * 1000 * 1000, 3).unwrap();
+    // 8. Debug on Vec<u32> — Tier 2 fallback (eager format to stash)
+    bench!("debug_vec", results, n, |i| {
+        inqjet::info!("state: {:?}", data)
+    });
 
-        println!("Warming up inqjet::info! hot-path...");
-        for i in 0..100 {
-            inqjet::info!("warmup message {}", i);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    // 9. Mixed Debug + Display — all three tiers in one call
+    //    &str {:?} = Tier 1.5, u64 {} = Tier 1, Vec {:?} = Tier 2
+    bench!("debug_display_mix", results, n, |i| {
+        inqjet::info!(
+            "request from user {:?} on instance {}: {:?}",
+            USERS[i % USERS.len()],
+            i as u64,
+            data
+        )
+    });
 
-        println!(
-            "Starting inqjet::info! hot-path benchmark with {} iterations...",
-            n
-        );
-        for i in 0..n {
-            let start = std::time::Instant::now();
-            inqjet::info!("logging to inqjet logger! msg number: {}", i);
-            let elapsed = start.elapsed();
-            hist.record(elapsed.as_nanos() as u64).unwrap();
+    // 10. Verbose 6-arg audit trail — stress test
+    bench!("verbose_6arg", results, n, |i| {
+        inqjet::info!(
+            "audit: user={} action={} resource={} from={} status={} latency={}ms",
+            USERS[i % USERS.len()],
+            ACTIONS[i % ACTIONS.len()],
+            PATHS[i % PATHS.len()],
+            IPS[i % IPS.len()],
+            200u32,
+            i as u64
+        )
+    });
 
-            if i % 1000 == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-        }
+    // 11. log::info! bridge path — for comparison with hot-path above
+    bench!("log_bridge", results, n, |i| {
+        log::info!("processed request in {}ms", i)
+    });
 
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        print_histogram_stats("InqJet (inqjet::info! hot-path)", &hist);
-    }
+    print_table("InqJet Scenario Results (producer-side latency)", &results);
 }

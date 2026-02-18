@@ -30,6 +30,7 @@ use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use crossbeam_utils::Backoff;
 use crossbeam_utils::sync::Unparker;
 use nexus_logbuf::queue::mpsc;
 
@@ -47,6 +48,9 @@ pub(crate) struct LoggerState {
     /// Global level filter (used by the `log` crate bridge).
     #[cfg(feature = "log-compat")]
     pub max_level: crate::LevelFilter,
+
+    /// Backpressure strategy when the ring buffer is full.
+    pub backpressure: crate::BackpressureMode,
 
     /// Shutdown flag. Arc-shared with guard and archiver.
     pub running: Arc<AtomicBool>,
@@ -138,6 +142,7 @@ pub(crate) fn log_impl(level: u8, target: &str, line: u32, args: std::fmt::Argum
                 _pad: [0u8; 7],
             };
 
+            let backoff = Backoff::new();
             loop {
                 match producer.try_claim(total_size) {
                     Ok(mut claim) => {
@@ -151,11 +156,13 @@ pub(crate) fn log_impl(level: u8, target: &str, line: u32, args: std::fmt::Argum
                         claim.commit();
                         break;
                     }
-                    Err(nexus_logbuf::TryClaimError::Full) => {
-                        // Backpressure: consumer must drain before we can proceed.
-                        state.unparker.unpark();
-                        std::hint::spin_loop();
-                    }
+                    Err(nexus_logbuf::TryClaimError::Full) => match state.backpressure {
+                        crate::BackpressureMode::Drop => return,
+                        crate::BackpressureMode::Backoff => {
+                            state.unparker.unpark();
+                            backoff.snooze();
+                        }
+                    },
                     Err(nexus_logbuf::TryClaimError::ZeroLength) => {
                         unreachable!("record size is always > 0");
                     }
@@ -201,6 +208,7 @@ pub(crate) fn hot_log_submit(
             .expect("re-entrant logging detected: Display/Debug impls must not call log macros");
         let producer = producer_opt.get_or_insert_with(|| state.source_producer.clone());
 
+        let backoff = Backoff::new();
         loop {
             match producer.try_claim(total_size) {
                 Ok(mut claim) => {
@@ -209,11 +217,13 @@ pub(crate) fn hot_log_submit(
                     claim.commit();
                     break;
                 }
-                Err(nexus_logbuf::TryClaimError::Full) => {
-                    // Backpressure: consumer must drain before we can proceed.
-                    state.unparker.unpark();
-                    std::hint::spin_loop();
-                }
+                Err(nexus_logbuf::TryClaimError::Full) => match state.backpressure {
+                    crate::BackpressureMode::Drop => return,
+                    crate::BackpressureMode::Backoff => {
+                        state.unparker.unpark();
+                        backoff.snooze();
+                    }
+                },
                 Err(nexus_logbuf::TryClaimError::ZeroLength) => {
                     unreachable!("record size is always > 0");
                 }

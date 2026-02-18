@@ -2,328 +2,174 @@
 
 ## Running
 
-### Quick
-
 ```bash
-cargo run --release --example bench_producer_latency
+# InqJet scenario benchmarks
+cargo test -p inqjet --release bench_inqjet -- --ignored --nocapture
+
+# Tracing comparison
+cargo test -p inqjet --release bench_tracing -- --ignored --nocapture
 ```
 
-### Accurate (recommended)
+For more stable results:
 
 ```bash
-# Disable turbo boost (Intel)
+# Disable turbo boost (Intel / AMD)
 echo 1 | sudo tee /sys/devices/system/cpu/intel_pstate/no_turbo
-# Disable turbo boost (AMD)
 echo 0 | sudo tee /sys/devices/system/cpu/cpufreq/boost
 
-# Pin to physical cores — avoids hyperthread sibling contention.
-# Core 0 for producer (main thread), core 2 for consumer (background).
-# Adjust core IDs based on your topology (check: lscpu -e).
-taskset -c 0,2 cargo run --release --example bench_producer_latency
+# Pin to physical cores — avoids hyperthread sibling contention
+taskset -c 0,2 cargo test -p inqjet --release bench_inqjet -- --ignored --nocapture
 ```
 
-### Comparison with tracing
+---
 
-```bash
-cargo test --release bench_tracing -- --ignored --nocapture
-```
+## Results
+
+### InqJet (inqjet::info! hot-path)
+
+100,000 iterations per scenario | 1MB ring buffer | busy-spin consumer
+
+| Scenario | p50 | p90 | p99 | p99.9 | max |
+|---|---:|---:|---:|---:|---:|
+| static_msg | 0.16us | 0.21us | 0.59us | 4.88us | 26.37us |
+| single_int | 0.11us | 0.19us | 0.43us | 0.69us | 113.41us |
+| single_str | 0.17us | 0.24us | 0.56us | 1.62us | 112.13us |
+| single_string | 0.17us | 0.23us | 0.54us | 1.48us | 150.78us |
+| realistic_4arg | 0.18us | 0.29us | 0.54us | 1.98us | 124.16us |
+| pod_triple | 0.17us | 0.24us | 0.51us | 1.67us | 110.27us |
+| float_precision | 0.08us | 0.18us | 0.36us | 0.79us | 103.74us |
+| debug_vec | 0.46us | 0.54us | 1.12us | 5.29us | 1840.13us |
+| debug_display_mix | 0.48us | 0.63us | 1.66us | 8.72us | 134.66us |
+| verbose_6arg | 0.21us | 0.25us | 0.69us | 2.23us | 142.72us |
+| log_bridge | 0.24us | 0.27us | 0.61us | 3.70us | 127.04us |
+
+### Tracing (tracing::info! native)
+
+100,000 iterations per scenario | non_blocking(262K) | file sink
+
+| Scenario | p50 | p90 | p99 | p99.9 | max |
+|---|---:|---:|---:|---:|---:|
+| static_msg | 0.99us | 1.69us | 2.71us | 16.06us | 148.22us |
+| single_int | 1.03us | 1.79us | 2.84us | 18.98us | 1861.63us |
+| single_str | 1.07us | 1.92us | 3.10us | 20.78us | 207.74us |
+| single_string | 1.03us | 1.72us | 2.71us | 18.83us | 175.36us |
+| realistic_4arg | 1.04us | 1.72us | 2.92us | 19.14us | 1859.58us |
+| pod_triple | 1.20us | 1.92us | 2.83us | 19.73us | 180.61us |
+| float_precision | 1.62us | 2.37us | 3.97us | 20.25us | 536.58us |
+| debug_vec | 1.20us | 1.84us | 3.19us | 17.97us | 126.78us |
+| debug_display_mix | 1.24us | 1.84us | 3.02us | 14.62us | 77.38us |
+| verbose_6arg | 1.31us | 2.04us | 3.56us | 16.70us | 146.81us |
+
+### Head-to-Head (p50)
+
+| Scenario | inqjet | tracing | Speedup |
+|---|---:|---:|---:|
+| static_msg | 0.16us | 0.99us | **6.2x** |
+| single_int | 0.11us | 1.03us | **9.4x** |
+| single_str | 0.17us | 1.07us | **6.3x** |
+| single_string | 0.17us | 1.03us | **6.1x** |
+| realistic_4arg | 0.18us | 1.04us | **5.8x** |
+| pod_triple | 0.17us | 1.20us | **7.1x** |
+| float_precision | 0.08us | 1.62us | **20.3x** |
+| debug_vec | 0.46us | 1.20us | **2.6x** |
+| debug_display_mix | 0.48us | 1.24us | **2.6x** |
+| verbose_6arg | 0.21us | 1.31us | **6.2x** |
+
+---
+
+## Scenario Descriptions
+
+| Scenario | Format string | Encoding path |
+|---|---|---|
+| static_msg | `"health check passed"` | No args |
+| single_int | `"processed request in {}ms"` + u64 | Tier 1: Pod memcpy (8B) |
+| single_str | `"user {} connected"` + &str | Tier 1.5: direct byte copy |
+| single_string | `"session {}"` + String | Tier 1.5: direct byte copy |
+| realistic_4arg | `"{} {} from {} status {}"` + 3x &str + u32 | Tier 1 + 1.5 mixed |
+| pod_triple | `"order id={} price={} qty={}"` + u64 + f64 + i64 | Tier 1: 24 bytes memcpy |
+| float_precision | `"latency: {:.4}ms"` + f64 | Tier 1: 8B memcpy, `{:.4}` applied on consumer |
+| debug_vec | `"state: {:?}"` + Vec\<u32\> | Tier 2: eager format to TLS stash |
+| debug_display_mix | `"request from user {:?} on instance {}: {:?}"` | Tier 1 + 1.5 + 2 (all three) |
+| verbose_6arg | `"audit: user={} action={} ..."` + 4x &str + u32 + u64 | Tier 1 + 1.5 mixed |
+| log_bridge | `log::info!("processed request in {}ms", i)` | log crate bridge path |
+
+---
+
+## Analysis
+
+### Where the speedup comes from
+
+**Pod and String paths (Tiers 1 & 1.5): 6-9x faster.** The producer memcpy's
+raw bytes instead of formatting. A u64 is 8 bytes copied; an f64 with `{:.4}`
+is also 8 bytes copied — the precision formatting happens on the consumer thread.
+Tracing formats everything eagerly on the producer.
+
+**float_precision: 20x faster.** This is the deferred-formatting advantage in
+its purest form. Both loggers produce the same output (`"0.5004"`), but inqjet's
+producer pays an 8-byte memcpy while tracing's producer pays `Display::fmt`
+with precision.
+
+**Debug fallback (Tier 2): still 2.6x faster.** When inqjet can't defer
+formatting (e.g. `{:?}` on a Vec), it eagerly formats to a thread-local
+buffer — same work as tracing. The remaining advantage is ring buffer transport
+vs channel overhead.
+
+**Scaling with arg count.** verbose_6arg (0.21us) is only ~30% more than
+single_int (0.11us). Adding args is cheap when most are Pod/string memcpy's.
+Tracing's cost scales more steeply because each additional arg adds formatting.
+
+### Tail latency
+
+InqJet's p99 is typically 2-3x its p50 — tight tail under low contention.
+The p99.9 gap widens further: inqjet 1-5us vs tracing 15-20us, likely due
+to allocator and channel contention effects in tracing's path.
+
+Max values in the hundreds of microseconds are scheduler preemptions — expected
+in any benchmark without full CPU isolation.
 
 ---
 
 ## Methodology
 
-### Timing: rdtscp
+- **Timing**: `Instant::now()` per iteration (~25ns overhead, consistent)
+- **Histogram**: HDR histogram with 3 significant digits
+- **Warmup**: 200 iterations before measurement
+- **Samples**: 100,000 per scenario
+- **Drain**: 25ms sleep every 1,000 iterations to let consumers keep up
+- **Isolation**: File sink (no terminal I/O variance), ANSI colors disabled
 
-All per-operation measurements use `rdtscp` (Read Time-Stamp Counter and
-Processor ID). This is a serializing instruction on x86-64 that reads the CPU's
-cycle counter after all prior instructions have completed.
+### InqJet setup
 
-Cost of the measurement itself: ~18-20 cycles. This is included in every sample
-but consistent, so it shifts all percentiles by a fixed offset without affecting
-the distribution shape.
+- 1MB ring buffer (`with_buffer_size(1 << 20)`)
+- Busy-spin consumer (`with_timeout(None)`)
+- `ColorMode::Never`
+- File writer with `BufWriter`
 
-Non-x86-64 platforms fall back to `Instant::now()` (~25-50ns, less precise).
+### Tracing setup
 
-### Recording: HDR Histogram
-
-All latency distributions are recorded in an HDR histogram with 3 significant
-digits of precision. This provides accurate percentile computation across the
-full range without fixed-width bucketing artifacts.
-
-### Warmup
-
-Each benchmark runs 10,000 warmup iterations before measurement. This ensures:
-- CPU caches (L1/L2/L3) are hot for the access pattern
-- Branch predictors have stabilized
-- TLB entries are populated
-- Allocator freelists are warm
-- JIT-like effects in the log dispatch path have settled
-
-### Samples
-
-100,000 measured samples per benchmark. Enough for stable p999 estimates
-(100 samples in the tail bucket).
-
-### Isolation
-
-- **NullWriter**: Consumer writes to a no-op writer (no syscalls, no I/O
-  variance). This isolates pure producer cost from consumer I/O behavior.
-- **Large capacity** (65,536): Channel never fills during measurement, so
-  producer never hits backpressure.
-- **Colors disabled**: No ANSI escape sequence formatting overhead.
-- **`black_box()`**: Prevents the compiler from constant-folding values or
-  eliminating dead code in the measured path.
+- `tracing_subscriber::fmt` with `tracing_appender::non_blocking`
+- 262K buffered lines limit
+- `with_ansi(false)`
+- File writer
 
 ---
 
-## What's Measured
+## Environment
 
-### Producer Latency
+Results will vary by hardware. The relative speedups should be consistent
+across x86-64 platforms. Record your environment for reproducible comparisons:
 
-The wall-to-wall cost of a `log::info!(...)` call on the application thread.
-
-**Includes:**
-- `log` crate dispatch (max_level check, Logger::log call)
-- Level filter check inside Logger
-- `SystemTime::now()` timestamp snap
-- String pool acquisition
-- `format_args!` evaluation and string formatting
-- Channel push (crossbeam ArrayQueue, single atomic CAS)
-- String pool return (on consumer side, not measured here)
-
-**Excludes:**
-- Consumer-side I/O (NullWriter)
-- Channel backpressure (large capacity, fast consumer)
-
-### Filtered Message Cost
-
-The cost of a `log::debug!()` or `log::trace!()` call when the global level
-filter is set to `Info`. These are rejected at the `log` crate's `max_level()`
-check before reaching InqJet's `Logger::log()`.
-
-Expected cost: ~1-10ns (single atomic load + branch).
-
-### Multi-Producer Contention
-
-Measures the producer latency of one thread while N-1 other threads are
-simultaneously logging. Shows the impact of CAS contention on the lock-free
-channel under concurrent access.
-
-### Sustained Throughput
-
-Total messages per second for a sustained burst. Uses wall-clock timing
-(`Instant`), not per-message rdtscp. Includes any backpressure effects that
-emerge during sustained load.
-
----
-
-## Benchmark Matrix
-
-### Type Spectrum
-
-Measures how formatting cost varies across types and format specifiers.
-Single-threaded, no contention.
-
-| Benchmark | Format | What it isolates |
-|-----------|--------|-----------------|
-| static &str (no args) | `"checkpoint reached"` | Baseline: no formatting |
-| single u64 | `"value: {}", u64` | Integer Display |
-| single f64 `{:.4}` | `"price: {:.4}", f64` | Float with precision |
-| single &str arg | `"name: {}", &str` | String interpolation |
-| single String arg | `"name: {}", String` | Owned string interpolation |
-| 4x mixed primitives | `"id={} qty={} price={:.2} active={}"` | Multi-arg formatting |
-| struct `{:?}` | `"order: {:?}", struct` | Debug trait formatting |
-| u64 `{:#x}` | `"addr: {:#x}", u64` | Hex with prefix |
-| `{:>20}` padded | `"status: {:>20}", &str` | Alignment/padding |
-
-### Payload Size
-
-Measures how output length affects producer cost. Uses pre-constructed strings
-of target lengths to isolate the write-more-bytes cost from formatting
-complexity.
-
-| Size | Typical use |
-|------|------------|
-| ~32 bytes | Short status message |
-| ~64 bytes | Typical one-liner |
-| ~128 bytes | Standard log line with context |
-| ~256 bytes | Verbose message |
-| ~512 bytes | Detailed error with context |
-| ~1024 bytes | Debug dump, stack trace excerpt |
-
-### Level Filtering
-
-| Benchmark | Expected cost |
-|-----------|--------------|
-| `info!` (accepted) | Full producer cost (~1-5us) |
-| `debug!` (filtered) | ~1-10ns (macro-level filter) |
-| `trace!` (filtered) | ~1-10ns (macro-level filter) |
-
-### Multi-Producer Contention
-
-| Producers | What it shows |
-|-----------|--------------|
-| 1 (baseline) | Uncontended producer latency |
-| 2 | CAS retry impact with one competitor |
-| 4 | CAS retry impact with three competitors |
-
----
-
-## Understanding Results
-
-### Units
-
-Output is in **CPU cycles** (raw rdtscp values). To convert to nanoseconds:
-
-```
-nanoseconds ≈ cycles / CPU_base_frequency_GHz
-```
-
-Example: On a 3.0 GHz CPU, 300 cycles ≈ 100ns ≈ 0.1μs.
-
-To find your base frequency:
 ```bash
 lscpu | grep "Model name"
-# or
-cat /proc/cpuinfo | grep "model name" | head -1
+uname -r
+rustc --version
 ```
 
-### Percentiles
-
-| Percentile | Meaning | Affected by |
-|------------|---------|-------------|
-| p50 | Median. Typical steady-state cost. | Algorithm, data layout |
-| p75 | 75th. Most calls cost less than this. | Algorithm, cache behavior |
-| p95 | 1 in 20. Start of tail. | L2/L3 cache misses |
-| p99 | 1 in 100. Significant tail. | TLB misses, allocator |
-| p999 | 1 in 1,000. Extreme tail. | Preemption, page faults |
-| max | Worst observed. Usually an outlier. | Scheduler, interrupts, SMIs |
-
-### Red Flags
-
-- **p50 >> expected**: Something fundamental is wrong (wrong writer, level
-  misconfigured, debug build).
-- **p99 >> 10x p50**: Severe tail latency. Look for allocations, lock
-  contention, or page faults on the producer path.
-- **p999 >> 100x p50**: Likely OS interference (context switches, interrupts).
-  Check core pinning and interrupt affinity.
-- **max >> 1,000x p50**: Normal for long-running benchmarks. A scheduler
-  preemption or SMI (System Management Interrupt) snuck in.
-
----
-
-## Baseline Results: Current Implementation (crossbeam transport)
-
-Measured on: (run `lscpu | grep "Model name"` to record your CPU)
-
-### Type Spectrum
-
-| Benchmark | p50 | p75 | p95 | p99 | p999 | max |
-|-----------|-----|-----|-----|-----|------|-----|
-| static &str (no args) | 868 | 992 | 1138 | 1292 | 2149 | 25215 |
-| single u64 (Display) | 942 | 1076 | 1184 | 1354 | 2423 | 28303 |
-| single f64 {:.4} | 1478 | 1604 | 1792 | 2547 | 6963 | 35071 |
-| single &str arg | 952 | 1074 | 1204 | 1422 | 2953 | 19839 |
-| single String arg | 964 | 1080 | 1204 | 1400 | 5991 | 26495 |
-| 4x mixed primitives | 1602 | 1744 | 1904 | 2481 | 7535 | 24431 |
-| struct {:?} (Debug) | 1378 | 1518 | 1680 | 2079 | 7223 | 31231 |
-| u64 {:#x} (hex) | 1012 | 1118 | 1248 | 1464 | 2339 | 30015 |
-| {:>20} (padded) | 1064 | 1204 | 1328 | 1536 | 6303 | 46271 |
-
-**Observations:**
-- Baseline floor (static message): ~868 cycles = timestamp + pool get + header format + channel push
-- Integer formatting adds ~74 cycles over baseline
-- f64 with precision is the most expensive single-type formatter (+610 cycles)
-- &str and String are nearly identical (both just copy bytes via Display)
-- 4x mixed args dominated by the f64 component
-
-### Payload Size
-
-| Size | p50 | p75 | p95 | p99 | p999 | max |
-|------|-----|-----|-----|-----|------|-----|
-| ~32B | 952 | 1068 | 1202 | 1780 | 4323 | 29263 |
-| ~64B | 958 | 1076 | 1218 | 1572 | 3037 | 44767 |
-| ~128B | 936 | 1066 | 1188 | 1368 | 4367 | 27167 |
-| ~256B | 1016 | 1102 | 1224 | 1472 | 2815 | 50431 |
-| ~512B | 1408 | 2004 | 2565 | 2979 | 9815 | 235775 |
-| ~1024B | 1996 | 2195 | 2821 | 5243 | 13767 | 962047 |
-
-**Observations:**
-- Flat from 32-256 bytes: formatting overhead dominates, not payload copy
-- Inflection at ~512 bytes: string operations start to matter
-- 1024B is ~2x the cost of 256B — scales with memcpy/write volume
-- Tail latency (p999, max) degrades sharply at large sizes
-
-### Level Filtering
-
-| Benchmark | p50 | p75 | p95 | p99 | p999 | max |
-|-----------|-----|-----|-----|-----|------|-----|
-| info! (accepted) | 932 | 1058 | 1174 | 1372 | 2461 | 43327 |
-| debug! (filtered) | 26 | 26 | 28 | 28 | 42 | 2413 |
-| trace! (filtered) | 24 | 26 | 26 | 28 | 38 | 622 |
-
-**Observations:**
-- Filtered messages cost ~26 cycles — effectively free (single atomic load + branch)
-- Ratio: accepted/filtered = ~36x. Level filtering is extremely effective.
-
-### Multi-Producer Contention
-
-| Producers | p50 | p75 | p95 | p99 | p999 | max |
-|-----------|-----|-----|-----|-----|------|-----|
-| 1 (baseline) | 884 | 990 | 1288 | 1552 | 2185 | 65247 |
-| 2 producers | 1354 | 1410 | 1760 | 3121 | 5979 | 43263 |
-| 4 producers | 1424 | 1576 | 2181 | 15303 | 45055 | 7020543 |
-
-**Observations:**
-- 2 producers: p50 +53%, p999 +174%. Moderate CAS contention.
-- 4 producers: p50 +61%, but **p99 explodes to 15K** and p999 to 45K.
-  Tail latency is the real casualty of contention — the median holds up
-  but the worst cases are 20-30x worse.
-- Max at 4 producers (7M cycles) is likely a scheduler preemption while
-  holding a CAS retry loop.
-
-### Sustained Throughput
-
-| Metric | Value |
-|--------|-------|
-| Messages | 1,000,000 |
-| Duration | 0.36s |
-| Throughput | 2,762,265 msg/s |
-| Avg latency | 0.36 us/msg |
-| Avg message size | ~81 bytes |
-| Byte throughput | ~224 MB/s |
-
-**Not close to 1 GB/s.** The bottleneck is `format_args!` processing on the
-producer, not transport. nexus-logbuf SPSC can push 20.7 GB/s of raw bytes —
-~92x headroom. The transport is waiting on the formatter.
-
-Path to GB/s: Phase 5 POD path at 50-100ns/msg → 10-20M msg/s → 0.8-1.6 GB/s
-of raw bytes through the ring buffer (no formatting on producer). For raw
-archival (dump bytes, format offline), this approaches transport-limited speed.
-
----
-
-## After nexus-logbuf Migration
-
-| Benchmark | p50 | p75 | p95 | p99 | p999 | max | vs baseline p50 |
-|-----------|-----|-----|-----|-----|------|-----|-----------------|
-| (to be measured after Phase 1) | | | | | | | |
-
-## After POD Path (Phase 5)
-
-| Benchmark | p50 | p75 | p95 | p99 | p999 | max | vs baseline p50 |
-|-----------|-----|-----|-----|-----|------|-----|-----------------|
-| (to be measured after Phase 5) | | | | | | | |
-
----
-
-## Environment Checklist
-
-For reproducible results:
+### Checklist for stable results
 
 - [ ] Release build (`--release`)
 - [ ] Turbo boost disabled
 - [ ] Pinned to physical cores (no HT siblings)
 - [ ] Minimal background load
-- [ ] Same kernel, same hardware for before/after comparisons
+- [ ] Same kernel and hardware for before/after comparisons
 - [ ] Run multiple times, report median run

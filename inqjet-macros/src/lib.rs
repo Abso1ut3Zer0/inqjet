@@ -347,7 +347,7 @@ fn generate(input: &HotLogInput) -> TokenStream2 {
                 use ::inqjet::pod::HotEncode as _;
                 ::inqjet::__fallback_stash_clear();
                 #prefix_setup
-                #(let #vn = &#args;)*
+                #(let #vn = &(#args);)*
                 #(let #sn = (&::inqjet::pod::HotArg(#vn)).hot_size_with(
                     |__stash: &mut ::std::string::String| {
                         use ::std::fmt::Write;

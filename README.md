@@ -1,266 +1,198 @@
-# InqJet ⚡
+# InqJet
 
-**Ultra-fast, low-latency logging for Rust applications**
+High-performance logging for latency-critical Rust applications.
 
-InqJet is a high-performance logging library designed for latency-critical applications where every microsecond counts. It achieves consistent single-digit μs producer-side overhead by decoupling log formatting from I/O operations using a lock-free architecture.
+InqJet defers formatting to a background thread. The producer writes raw bytes
+to a lock-free ring buffer, not formatted strings. The hot-path cost is
+independent of message complexity.
 
-## ✨ Features
+## Performance
 
-- 🚀 **Ultra-low latency**: Single-digit μs producer-side overhead (cold start optimized)
-- 🔒 **Lock-free architecture**: Zero contention between logging threads
-- 💾 **Minimal allocations**: String pooling eliminates malloc/free overhead
-- 🎨 **Colored output**: ANSI color-coded log levels for better readability
-- ⏱️ **Structured format**: ISO 8601 timestamps with microsecond precision
-- 🎯 **Efficient filtering**: Level-based filtering with minimal overhead
-- 🛡️ **Clean shutdown**: Guaranteed message delivery on application exit
-- 🔧 **Configurable**: Tunable for different latency/throughput profiles
+**6-20x faster than tracing** across realistic logging scenarios (p50, single producer):
 
-## 🚀 Quick Start
+| Scenario | inqjet | tracing | Speedup |
+|---|---:|---:|---:|
+| Static message | 0.16us | 0.99us | 6.2x |
+| Single integer | 0.11us | 1.03us | 9.4x |
+| Single &str | 0.17us | 1.07us | 6.3x |
+| Realistic 4-arg | 0.18us | 1.04us | 5.8x |
+| Float `{:.4}` | 0.08us | 1.62us | 20.3x |
+| Debug `{:?}` Vec | 0.46us | 1.20us | 2.6x |
+| Verbose 6-arg | 0.21us | 1.31us | 6.2x |
 
-Initialize the logger:
+See [BENCHMARKS.md](BENCHMARKS.md) for full results including tail latency
+and methodology.
+
+## Quick Start
 
 ```rust
-use inqjet::InqJetBuilder;
-use log::{info, error, LevelFilter};
+use inqjet::{InqJetBuilder, LevelFilter};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Initialize logger with stdout output
     let _guard = InqJetBuilder::default()
         .with_writer(std::io::stdout())
         .with_log_level(LevelFilter::Info)
         .build()?;
 
-    // Use standard logging macros
-    info!("Server started on port {}", 8080);
-    error!("Connection failed: timeout");
+    // Native macros — bypass the log facade, direct to ring buffer:
+    inqjet::info!("Server started on port {}", 8080);
+    inqjet::error!("Connection failed: {}", "timeout");
 
-    // Logger automatically shuts down when guard is dropped
+    // log crate macros also work (with `log-compat` feature, on by default):
+    // log::info!("This also works");
+
+    // Guard drop joins the archiver thread and flushes remaining records.
     Ok(())
 }
 ```
 
-## 📊 Performance
+## Why It's Fast
 
-InqJet is specifically optimized for **producer-side latency** - the time it takes for a log statement to be passed to the background appender thread.
+### Don't Format on the Hot Path
 
-## 🏗️ Architecture
+Traditional loggers (tracing, env_logger, slog) format the log message on the
+caller's thread. For `info!("price: {:.4}", 99.95)`, the caller pays the cost
+of float-to-string conversion before the message is handed off.
+
+InqJet flips this. The producer writes the raw f64 bytes (8-byte memcpy) to a
+ring buffer. A background archiver thread reads those bytes and formats the
+output. The producer never calls `Display::fmt`.
+
+### Three-Tier Argument Encoding
+
+A proc macro (`inqjet::info!()`) analyzes the format string at compile time and
+generates per-argument encoding via autoref dispatch:
+
+| Tier | Types | Producer cost | Mechanism |
+|------|-------|---------------|-----------|
+| 1. Pod | Primitives, user structs | `memcpy` | `copy_nonoverlapping` to ring buffer |
+| 1.5. String | `&str`, `String` | Length-prefix + byte copy | `[len: u32][bytes]` |
+| 2. Fallback | Everything else | Eager `format_args!` | Format to TLS buffer, copy as bytes |
+
+Tiers 1 and 1.5 are the common cases. Only Tier 2 (Debug on complex types)
+formats on the producer — and even then, inqjet's ring buffer transport is
+faster than tracing's channel.
+
+### Architecture
 
 ```
-[Producer Threads] → [Logger] → [Lock-free Channel] → [Background Thread] → [Output]
-       ↓               ↓              ↓                     ↓               ↓
-   log!() calls    Format msg     Queue message         Write to I/O      File/Stdout
-   (1-5μs)         Pool strings    (lock-free)          (background)
+Producer Thread                       Archiver Thread
+---------------                       ---------------
+inqjet::info!("msg: {}", val)         loop {
+  |-- level check (AtomicU8 load)       record = consumer.try_read()
+  |-- snap timestamp (u64 ns)           |-- read header (24 bytes)
+  |-- encode args as raw bytes          |-- extract fn_ptr, timestamp, level
+  |-- claim ring buffer space           +-- (fn_ptr)(ts, lvl, payload, writer)
+  |-- memcpy header + payload           flush writer
+  +-- commit (atomic store)             park_timeout if idle
 ```
 
-### Key Design Decisions
+Key design decisions:
 
-1. **String Pool**: Reuses pre-allocated 256-byte strings, automatically growing as needed
-2. **Lock-free Channel**: `crossbeam::ArrayQueue` for zero-contention message passing
-3. **Background I/O**: Dedicated consumer thread handles all expensive I/O operations
-4. **Early Filtering**: Level checks happen before any formatting overhead
-5. **Guaranteed Delivery**: Backpressure blocks producers rather than dropping messages
+- **Ring buffer, not channel.** `nexus-logbuf` MPSC ring buffer. Fixed
+  allocation, no per-message malloc. CAS-based multi-producer, single consumer.
+- **Thread-local producers.** Each thread lazily clones a producer on first log
+  call. After that, pure thread-local — zero contention on the producer path.
+- **Function pointer dispatch.** Each record header carries a
+  `fn(ts, level, &[u8], &mut Write)`. The consumer calls it to format the
+  payload. No vtable, no dynamic dispatch beyond the fn ptr.
+- **Level gating before format_args.** The `AtomicU8` check happens before
+  `format_args!()` evaluates its arguments. Filtered messages cost ~8ns.
 
-## 📋 Log Format
+## Pod Types
 
-InqJet produces structured, colored log output:
+Mark your structs for zero-cost logging via memcpy:
 
+```rust
+use inqjet::Pod;
+
+#[derive(Pod, Debug)]
+struct OrderInfo {
+    id: u64,
+    price: f64,
+    qty: i64,
+}
+
+// Producer copies 24 bytes. Consumer formats with the original format string.
+inqjet::info!("order: id={} price={:.2} qty={}", order.id, order.price, order.qty);
 ```
-2024-01-15T14:30:45.123456Z [INFO] my_app::auth:127 - User alice logged in
-2024-01-15T14:30:45.124001Z [ERROR] my_app::db - Connection failed: timeout
-├─ Timestamp (gray)         ├─ Level (colored)  ├─ Target:line (gray)  ├─ Message
-└─ ISO 8601 with μs         └─ Color coded      └─ Optional line number └─ User content
+
+`#[derive(Pod)]` enforces at compile time that the type has no `Drop` impl.
+
+## Configuration
+
+```rust
+use inqjet::{InqJetBuilder, LevelFilter, ColorMode, BackpressureMode};
+use std::time::Duration;
+
+let _guard = InqJetBuilder::default()
+    .with_writer(std::io::stdout())
+    .with_log_level(LevelFilter::Info)
+    .with_buffer_size(1 << 20)                       // 1MB ring buffer (default: 64KB)
+    .with_timeout(Some(Duration::from_millis(5)))     // Archiver park timeout (default)
+    .with_color_mode(ColorMode::Auto)                 // Auto / Always / Never
+    .with_backpressure(BackpressureMode::Backoff)     // Backoff (default) or Drop
+    .build()?;
 ```
 
-### Color Scheme
+### Buffer Size
 
-- 🔴 **ERROR**: Red
-- 🟡 **WARN**: Yellow
-- 🟢 **INFO**: Green
-- 🔵 **DEBUG**: Cyan
-- ⚪ **TRACE**: Gray
+Ring buffer size in bytes (rounded up to next power of two). Default: 64KB.
 
-## ⚙️ Configuration
+- **64KB**: Low-memory, consistent message rate
+- **256KB-1MB**: Recommended for bursty workloads
+- **4MB+**: High-throughput, many producers
 
-### Basic Configuration
+### Backpressure
+
+When the ring buffer is full:
+
+- **`Backoff`** (default): Exponential backoff via `crossbeam::Backoff`. Spins
+  briefly, then yields. Guarantees delivery at the cost of variable latency
+  under pressure.
+- **`Drop`**: Drop the message and return immediately. Bounded producer latency,
+  no delivery guarantee.
+
+### Ultra-Low Latency Mode
+
+Busy-spin the archiver thread (dedicates a CPU core):
 
 ```rust
 let _guard = InqJetBuilder::default()
     .with_writer(std::io::stdout())
     .with_log_level(LevelFilter::Info)
+    .with_timeout(None)  // Busy-spin, never park
     .build()?;
 ```
 
-### File Logging
+### Runtime Level Adjustment
 
 ```rust
-use std::fs::OpenOptions;
-
-let file = OpenOptions::new()
-    .create(true)
-    .append(true)
-    .open("app.log")?;
-
-let _guard = InqJetBuilder::default()
-    .with_writer(file)
-    .with_log_level(LevelFilter::Debug)
-    .build()?;
+inqjet::set_level(LevelFilter::Debug);
 ```
 
-### Performance Tuning
+Takes effect immediately for all subsequent log calls.
 
-#### String Capacity
+## Feature Flags
 
-Configure the string capacity in the string pool based on your typical log message length.
+| Flag | Default | Description |
+|------|---------|-------------|
+| `log-compat` | Yes | Enables `log::Log` bridge so `log::info!()` routes through inqjet. |
 
-```rust
-let _guard = InqJetBuilder::default()
-    .with_string_capacity(1024)  // 1KB sized strings in pool
-    .build()?;
+Without `log-compat`, only the native `inqjet::info!()` macros are available.
+The native macros are always faster than the bridge path.
+
+## Log Format
+
+```
+2024-01-15T14:30:45.123456789Z [INFO] my_app::auth:127 User alice logged in
+2024-01-15T14:30:45.124001234Z [ERROR] my_app::db Connection failed: timeout
 ```
 
-- **128-256**: Memory-constrained environments, short messages
-- **256-512**: Balanced default (256 is default), handles most messages
-- **512-1024**: Verbose logging, detailed error messages
-- **1024+**: Very detailed logging, structured data, stack traces
+ISO 8601 UTC timestamps with nanosecond precision. ANSI colors when writing to
+a terminal (respects `NO_COLOR` and `TERM=dumb`).
 
-#### Channel Capacity
+## License
 
-Size the channel based on your burst patterns:
-
-```rust
-let _guard = InqJetBuilder::default()
-    .with_capacity(4096)  // Large buffer for traffic bursts
-    .build()?;
-```
-
-- **64-256**: Consistent applications, quick backpressure
-- **512-1024**: Balanced throughput and memory usage (recommended)
-- **2048+**: High-burst applications, absorb traffic spikes
-
-#### Ultra-Low Latency Mode
-
-For absolute minimum latency (lowest possible tails), use spinning appender (dedicates a CPU core):
-
-```rust
-let _guard = InqJetBuilder::default()
-    .with_timeout(None)  // Spin forever, never park
-    .build()?;
-```
-
-**Performance impact:**
-- ✅ **Producer**: Never calls `unpark()` - no kernel overhead for wakeups
-- ✅ **Consumer**: Sub-microsecond message processing
-- ❌ **CPU**: Consumes 100% of one CPU core continuously
-
-#### Balanced Mode (Default)
-
-For responsive shutdown with minimal overhead:
-
-```rust
-use std::time::Duration;
-
-let _guard = InqJetBuilder::default()
-    .with_timeout(Some(Duration::from_millis(5)))  // Default
-    .build()?;
-```
-
-## 🔧 Advanced Usage
-
-### Custom Writers
-
-InqJet works with any `Write + Send + 'static` type:
-
-```rust
-use std::net::TcpStream;
-
-// Network logging
-let stream = TcpStream::connect("log-server:514")?;
-let _guard = InqJetBuilder::default()
-    .with_writer(stream)
-    .build()?;
-
-// Multiple outputs (using a custom writer)
-struct MultiWriter {
-    stdout: std::io::Stdout,
-    file: std::fs::File,
-}
-
-impl std::io::Write for MultiWriter {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.stdout.write_all(buf)?;
-        self.file.write_all(buf)?;
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.stdout.flush()?;
-        self.file.flush()
-    }
-}
-```
-
-### Integration with Existing Code
-
-InqJet is fully compatible with the standard `log` crate:
-
-```rust
-// Works with any crate using the log facade
-use log::{info, debug, error};
-use serde_json::json;
-
-// Structured logging
-let user_data = json!({
-    "user_id": 12345,
-    "action": "login",
-    "ip": "192.168.1.100"
-});
-
-info!("User event: {}", user_data);
-
-// Error logging with context
-if let Err(e) = risky_operation() {
-    error!("Operation failed: {} (retrying in 5s)", e);
-}
-```
-
-## 🏆 When to Use InqJet
-
-### ✅ Perfect For
-
-- **Latency-critical applications**: Trading systems, real-time games, embedded systems
-- **High-frequency logging**: Applications logging thousands of messages per second
-- **Performance monitoring**: Where logging overhead itself affects metrics
-- **Hot path logging**: When logs are in critical performance paths
-
-### ❌ Consider Alternatives
-
-- **Simple applications**: If logging latency isn't critical, `env_logger` is simpler
-- **Structured logging**: If you need complex structured data, consider `tracing`
-- **Memory-constrained environments**: InqJet uses more memory for performance
-- **Single-threaded applications**: The background thread overhead may not be worth it
-
-### Feature Flags
-
-Currently InqJet has no optional features - it's designed to be minimal and fast by default.
-
-## 🙋 FAQ
-
-### Q: Why not use `tracing`?
-
-**A:** `tracing` is excellent for structured logging and observability, but has higher latency overhead (10-50μs cold start vs 1-5μs for InqJet). If you need structured data and spans, use `tracing`. If you need raw speed, use InqJet.
-
-### Q: Can I use InqJet with async runtimes?
-
-**A:** Yes! InqJet works perfectly with tokio, async-std, and other runtimes. The background thread is independent of your async runtime.
-
-### Q: Does InqJet support log rotation?
-
-**A:** Not directly. Use external tools like `logrotate` or provide a custom writer that handles rotation.
-
-### Q: What happens if the consumer can't keep up?
-
-**A:** Producers will block with exponential backoff until the consumer catches up. No messages are dropped - InqJet guarantees delivery.
-
-### Q: Can I have multiple InqJet instances?
-
-**A:** No, InqJet sets itself as the global logger. Only one logger can be active per process.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.

@@ -147,11 +147,62 @@ impl<T: Pod> HotArg<&T> {
     }
 }
 
+// -- Tier 1.5: Direct-copy for string types -----------------------------------
+
+impl HotArg<&&str> {
+    #[inline]
+    pub fn hot_size(&self) -> usize {
+        4 + self.0.len()
+    }
+
+    #[inline]
+    pub fn hot_size_with<F: FnOnce(&mut String)>(&self, _fmt: F) -> usize {
+        self.hot_size()
+    }
+
+    #[inline]
+    pub fn hot_encode(&self, buf: &mut [u8]) {
+        let bytes = self.0.as_bytes();
+        buf[..4].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buf[4..4 + bytes.len()].copy_from_slice(bytes);
+    }
+
+    #[inline]
+    pub fn hot_witness(&self) -> Witness<String> {
+        Witness(std::marker::PhantomData)
+    }
+}
+
+impl HotArg<&String> {
+    #[inline]
+    pub fn hot_size(&self) -> usize {
+        4 + self.0.len()
+    }
+
+    #[inline]
+    pub fn hot_size_with<F: FnOnce(&mut String)>(&self, _fmt: F) -> usize {
+        self.hot_size()
+    }
+
+    #[inline]
+    pub fn hot_encode(&self, buf: &mut [u8]) {
+        let bytes = self.0.as_bytes();
+        buf[..4].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+        buf[4..4 + bytes.len()].copy_from_slice(bytes);
+    }
+
+    #[inline]
+    pub fn hot_witness(&self) -> Witness<String> {
+        Witness(std::marker::PhantomData)
+    }
+}
+
 // -- Tier 2: Blanket impl for everything else ---------------------------------
 
 impl<T> HotEncode for HotArg<&T> {
     #[inline]
     fn hot_size_with<F: FnOnce(&mut String)>(&self, fmt: F) -> usize {
+        FALLBACK_DIRTY.with(|d| d.set(true));
         FALLBACK_BUF.with(|buf| {
             let mut buf = buf.borrow_mut();
             let start = buf.len();
@@ -253,6 +304,7 @@ impl HotDecode for PreFormatted {
 // -- Thread-local fallback stash ----------------------------------------------
 
 thread_local! {
+    static FALLBACK_DIRTY: Cell<bool> = const { Cell::new(false) };
     static FALLBACK_BUF: RefCell<String> = const { RefCell::new(String::new()) };
     static FALLBACK_OFFSETS: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
     static FALLBACK_READ_IDX: Cell<usize> = const { Cell::new(0) };
@@ -273,11 +325,19 @@ pub fn reserve_fallback_capacity(bytes: usize) {
 }
 
 /// Clears the fallback stash. Called at the start of each log block.
+///
+/// Optimized: if no fallback args were stashed since the last clear,
+/// this is a single TLS load (~3ns) instead of touching all three TLS slots.
 #[doc(hidden)]
 pub fn fallback_stash_clear() {
-    FALLBACK_BUF.with(|b| b.borrow_mut().clear());
-    FALLBACK_OFFSETS.with(|o| o.borrow_mut().clear());
-    FALLBACK_READ_IDX.with(|i| i.set(0));
+    FALLBACK_DIRTY.with(|d| {
+        if d.get() {
+            d.set(false);
+            FALLBACK_BUF.with(|b| b.borrow_mut().clear());
+            FALLBACK_OFFSETS.with(|o| o.borrow_mut().clear());
+            FALLBACK_READ_IDX.with(|i| i.set(0));
+        }
+    });
 }
 
 /// Encodes the next stashed fallback value into `buf` as length-prefixed bytes.
@@ -400,20 +460,17 @@ mod tests {
         test_primitive!(bool, false);
     }
 
-    // -- Stash-based dispatch tests (String, &str, everything else) ----------
+    // -- Direct-copy dispatch tests (String, &str) — Tier 1.5 ----------------
 
     #[test]
-    fn stash_string() {
-        fallback_stash_clear();
+    fn direct_copy_string() {
         let val = String::from("hello world");
-        let size = (&HotArg(&val)).hot_size_with(|stash| {
-            use std::fmt::Write;
-            write!(stash, "{}", val).ok();
-        });
+        // Inherent method on HotArg<&String>: no stash involved
+        let size = HotArg(&val).hot_size();
         assert_eq!(size, 4 + 11);
 
         let mut buf = vec![0u8; size];
-        (&HotArg(&val)).hot_encode(&mut buf);
+        HotArg(&val).hot_encode(&mut buf);
 
         let (content, consumed) = bytes_from_buf(&buf);
         assert_eq!(content, "hello world");
@@ -421,17 +478,13 @@ mod tests {
     }
 
     #[test]
-    fn stash_str_ref() {
-        fallback_stash_clear();
+    fn direct_copy_str_ref() {
         let val: &str = "hello";
-        let size = (&HotArg(&val)).hot_size_with(|stash| {
-            use std::fmt::Write;
-            write!(stash, "{}", val).ok();
-        });
+        let size = HotArg(&val).hot_size();
         assert_eq!(size, 4 + 5);
 
         let mut buf = vec![0u8; size];
-        (&HotArg(&val)).hot_encode(&mut buf);
+        HotArg(&val).hot_encode(&mut buf);
 
         let (content, consumed) = bytes_from_buf(&buf);
         assert_eq!(content, "hello");
@@ -439,22 +492,40 @@ mod tests {
     }
 
     #[test]
-    fn stash_empty_string() {
-        fallback_stash_clear();
+    fn direct_copy_empty_string() {
         let val = String::new();
-        let size = (&HotArg(&val)).hot_size_with(|stash| {
-            use std::fmt::Write;
-            write!(stash, "{}", val).ok();
-        });
+        let size = HotArg(&val).hot_size();
         assert_eq!(size, 4); // just the length prefix
 
         let mut buf = vec![0u8; size];
-        (&HotArg(&val)).hot_encode(&mut buf);
+        HotArg(&val).hot_encode(&mut buf);
 
         let (content, consumed) = bytes_from_buf(&buf);
         assert_eq!(content, "");
         assert_eq!(consumed, 4);
     }
+
+    #[test]
+    fn direct_copy_closure_not_called() {
+        let val = String::from("test");
+        let called = Cell::new(false);
+        let size = HotArg(&val).hot_size_with(|_| {
+            called.set(true);
+        });
+        assert_eq!(size, 4 + 4);
+        assert!(!called.get(), "closure should not be called for String");
+    }
+
+    #[test]
+    fn direct_copy_stash_not_dirtied() {
+        fallback_stash_clear();
+        let val: &str = "clean";
+        let _size = HotArg(&val).hot_size_with(|_| {});
+        // Stash should remain clean — direct-copy bypasses it
+        FALLBACK_DIRTY.with(|d| assert!(!d.get()));
+    }
+
+    // -- Stash-based dispatch tests (Vec, other non-POD types) ----------------
 
     #[test]
     fn stash_vec() {
