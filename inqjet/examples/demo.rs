@@ -247,14 +247,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     inqjet::error!("fatal: unrecoverable state");
 
     // =====================================================================
-    // 12. log crate bridge (log-compat feature)
+    // 12. Side-by-side: inqjet macros vs log crate bridge
+    //     Both paths produce the same output format. inqjet macros use the
+    //     hot-path (raw bytes, deferred formatting). log macros go through
+    //     the log::Log bridge (format on producer, standard payload).
     // =====================================================================
-    eprintln!("--- log bridge ---");
-    log::error!("bridge error: {}", "something broke");
-    log::warn!("bridge warn: retries={}", 3);
-    log::info!("bridge info: user={}", "bob");
-    log::debug!("bridge debug: {:?}", vec![1, 2, 3]);
-    log::trace!("bridge trace");
+    eprintln!("--- inqjet vs log bridge: side by side ---");
+
+    // All levels via log bridge
+    log::error!("log bridge error");
+    log::warn!("log bridge warn");
+    log::info!("log bridge info");
+    log::debug!("log bridge debug");
+    log::trace!("log bridge trace");
+
+    // Same messages via inqjet macros
+    inqjet::error!("inqjet macro error");
+    inqjet::warn!("inqjet macro warn");
+    inqjet::info!("inqjet macro info");
+    inqjet::debug!("inqjet macro debug");
+    inqjet::trace!("inqjet macro trace");
+
+    // Formatted args — both paths
+    log::info!("log: user {} processed {} orders", "alice", 42);
+    inqjet::info!("inqjet: user {} processed {} orders", "alice", 42u32);
+
+    log::info!("log: price={:.2} qty={}", 42150.75, 100);
+    inqjet::info!("inqjet: price={:.2} qty={}", 42150.75f64, 100i64);
+
+    // Debug via log bridge (formats on producer thread)
+    log::info!("log: data={:?}", vec![1, 2, 3, 4, 5]);
+    // Debug via inqjet (eager format to TLS stash, then ring buffer)
+    inqjet::info!("inqjet: data={:?}", vec![1u32, 2, 3, 4, 5]);
+
+    // Custom target via log bridge
+    log::info!(target: "custom::target", "log bridge with custom target");
+    inqjet::info!(target: "custom::target", "inqjet with custom target");
+
+    // Multi-arg via log bridge
+    log::info!(
+        "log: {} {} from {} status={} latency={}us",
+        "GET",
+        "/api/v1/orders",
+        "10.0.1.42",
+        200,
+        123
+    );
+    inqjet::info!(
+        "inqjet: {} {} from {} status={} latency={}us",
+        "GET",
+        "/api/v1/orders",
+        "10.0.1.42",
+        200u32,
+        123u64
+    );
 
     // =====================================================================
     // 13. Runtime level change
