@@ -517,3 +517,30 @@ fn is_color_enabled(color_mode: ColorMode) -> bool {
         ColorMode::Never => false,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_fails_without_writer() {
+        let result = InqJetBuilder::<Vec<u8>>::default()
+            .with_log_level(LevelFilter::Info)
+            .build();
+        assert!(matches!(
+            result,
+            Err(InqJetBuilderError::NoConfiguredWriter)
+        ));
+    }
+
+    #[test]
+    fn build_fails_without_log_level() {
+        let result = InqJetBuilder::default()
+            .with_writer(std::io::sink())
+            .build();
+        assert!(matches!(
+            result,
+            Err(InqJetBuilderError::NoConfiguredLogLevel)
+        ));
+    }
+}

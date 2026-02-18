@@ -5,54 +5,22 @@
 //! functions would fight over the global and only the first init's
 //! writer would receive records.
 
-use std::io::{self, Write};
-use std::sync::{Arc, Mutex};
+mod common;
 
 use inqjet::{ColorMode, InqJetBuilder, LevelFilter};
 
-/// Shared writer that captures output for assertions.
-#[derive(Clone)]
-struct CaptureWriter {
-    buf: Arc<Mutex<Vec<u8>>>,
-}
+// -- User POD type for derive(Pod) coverage ----------------------------------
 
-impl CaptureWriter {
-    fn new() -> Self {
-        Self {
-            buf: Arc::new(Mutex::new(Vec::new())),
-        }
-    }
-
-    fn contents(&self) -> String {
-        let lock = self.buf.lock().unwrap();
-        String::from_utf8(lock.clone()).unwrap()
-    }
-
-    fn clear(&self) {
-        self.buf.lock().unwrap().clear();
-    }
-}
-
-impl Write for CaptureWriter {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.buf.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// Wait for archiver to process records.
-fn drain() {
-    std::thread::sleep(std::time::Duration::from_millis(50));
+#[derive(Clone, Debug, PartialEq, inqjet::Pod)]
+struct OrderInfo {
+    id: u64,
+    price: f64,
 }
 
 #[test]
 fn standalone_macros() {
-    let writer = CaptureWriter::new();
-    let _guard = InqJetBuilder::default()
+    let writer = common::CaptureWriter::new();
+    let guard = InqJetBuilder::default()
         .with_writer(writer.clone())
         .with_log_level(LevelFilter::Trace)
         .with_color_mode(ColorMode::Never)
@@ -66,7 +34,7 @@ fn standalone_macros() {
     inqjet::info!("info msg");
     inqjet::debug!("debug msg");
     inqjet::trace!("trace msg");
-    drain();
+    common::drain();
 
     let output = writer.contents();
     assert!(output.contains("[ERROR]"), "missing ERROR: {output}");
@@ -88,7 +56,7 @@ fn standalone_macros() {
     inqjet::info!("pi: {:.2}", 3.14159);
     inqjet::info!("debug: {:?}", vec![1, 2, 3]);
     inqjet::info!("multi: {} {} {}", "a", "b", "c");
-    drain();
+    common::drain();
 
     let output = writer.contents();
     assert!(
@@ -110,7 +78,7 @@ fn standalone_macros() {
     writer.clear();
 
     inqjet::info!(target: "custom::target", "targeted msg");
-    drain();
+    common::drain();
 
     let output = writer.contents();
     assert!(
@@ -127,7 +95,7 @@ fn standalone_macros() {
     writer.clear();
 
     inqjet::info!("static message with no args");
-    drain();
+    common::drain();
 
     let output = writer.contents();
     assert!(
@@ -135,7 +103,30 @@ fn standalone_macros() {
         "missing static msg: {output}"
     );
 
-    // -- Level filtering: messages below threshold not produced ---------------
+    // -- User POD type with derive(Pod) + Debug format -----------------------
+
+    writer.clear();
+
+    let order = OrderInfo {
+        id: 12345,
+        price: 99.95,
+    };
+    inqjet::info!("order {:?}", order);
+    inqjet::info!("hex {:x}", 255u64);
+    common::drain();
+
+    let output = writer.contents();
+    assert!(
+        output.contains("OrderInfo"),
+        "missing OrderInfo in debug output: {output}"
+    );
+    assert!(
+        output.contains("12345"),
+        "missing order id in debug output: {output}"
+    );
+    assert!(output.contains("hex ff"), "missing hex format: {output}");
+
+    // -- Level gate function -------------------------------------------------
 
     writer.clear();
 
@@ -144,4 +135,126 @@ fn standalone_macros() {
     assert!(inqjet::__log_enabled(1)); // Error: enabled at Trace
     assert!(inqjet::__log_enabled(5)); // Trace: enabled at Trace
     assert!(!inqjet::__log_enabled(6)); // Above Trace: disabled
+
+    // -- Level filtering: filtered messages absent ---------------------------
+
+    inqjet::set_level(LevelFilter::Warn);
+    inqjet::info!("should be filtered");
+    common::drain();
+
+    let output = writer.contents();
+    assert!(
+        !output.contains("should be filtered"),
+        "info msg should be filtered at Warn level: {output}"
+    );
+
+    inqjet::set_level(LevelFilter::Trace); // restore
+
+    // -- set_level() runtime change ------------------------------------------
+
+    writer.clear();
+
+    // At Trace: info should appear
+    inqjet::info!("runtime info visible");
+    common::drain();
+    assert!(
+        writer.contents().contains("runtime info visible"),
+        "info should be visible at Trace: {}",
+        writer.contents()
+    );
+
+    // Switch to Error: warn should be absent
+    writer.clear();
+    inqjet::set_level(LevelFilter::Error);
+    inqjet::warn!("runtime warn filtered");
+    common::drain();
+    assert!(
+        !writer.contents().contains("runtime warn filtered"),
+        "warn should be filtered at Error: {}",
+        writer.contents()
+    );
+
+    // Switch to Debug: debug should appear
+    writer.clear();
+    inqjet::set_level(LevelFilter::Debug);
+    inqjet::debug!("runtime debug visible");
+    common::drain();
+    assert!(
+        writer.contents().contains("runtime debug visible"),
+        "debug should be visible at Debug: {}",
+        writer.contents()
+    );
+
+    inqjet::set_level(LevelFilter::Trace); // restore
+
+    // -- Multi-threaded producers --------------------------------------------
+
+    writer.clear();
+
+    let threads: Vec<_> = (0..4u32)
+        .map(|tid| {
+            std::thread::spawn(move || {
+                for i in 0..50u32 {
+                    inqjet::info!("thread-{} msg-{}", tid, i);
+                }
+            })
+        })
+        .collect();
+
+    for t in threads {
+        t.join().unwrap();
+    }
+    common::drain();
+
+    let output = writer.contents();
+    for tid in 0..4u32 {
+        for i in 0..50u32 {
+            let expected = format!("thread-{tid} msg-{i}");
+            assert!(
+                output.contains(&expected),
+                "missing '{expected}' in multi-thread output"
+            );
+        }
+    }
+
+    // -- Non-ASCII UTF-8 ----------------------------------------------------
+
+    writer.clear();
+
+    inqjet::info!("cjk: 你好世界");
+    inqjet::info!("accented: café résumé naïve");
+    inqjet::info!("emoji: 🦀🔥");
+    common::drain();
+
+    let output = writer.contents();
+    assert!(output.contains("cjk: 你好世界"), "missing CJK: {output}");
+    assert!(
+        output.contains("accented: café résumé naïve"),
+        "missing accented: {output}"
+    );
+    assert!(output.contains("emoji: 🦀🔥"), "missing emoji: {output}");
+
+    // -- Guard drop drains remaining records (MUST BE LAST) -----------------
+
+    writer.clear();
+
+    inqjet::info!("drain-on-drop 1");
+    inqjet::info!("drain-on-drop 2");
+    inqjet::info!("drain-on-drop 3");
+    // Do NOT drain — rely on guard drop to flush
+    drop(guard);
+
+    let output = writer.contents();
+    assert!(
+        output.contains("drain-on-drop 1"),
+        "guard drop should drain record 1: {output}"
+    );
+    assert!(
+        output.contains("drain-on-drop 2"),
+        "guard drop should drain record 2: {output}"
+    );
+    assert!(
+        output.contains("drain-on-drop 3"),
+        "guard drop should drain record 3: {output}"
+    );
 }
