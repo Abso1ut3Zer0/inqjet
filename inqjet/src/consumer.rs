@@ -28,18 +28,25 @@ pub(crate) fn archiver_loop(
     timeout: Option<Duration>,
     parker: Parker,
 ) {
+    // Reusable format buffer — grows to max line size once, never deallocated.
+    // Batches the many small write!() calls from format functions into a
+    // single write_all() to the real writer per record.
+    let mut buf = Vec::with_capacity(256);
+
     while running.load(Ordering::Relaxed) {
         let mut had_work = false;
 
         while let Some(claim) = stream.consumer.try_claim() {
             let header = record::read_header(&claim);
             let payload = &claim[record::HEADER_SIZE..];
+            buf.clear();
             (header.formatter)(
                 header.timestamp_ns,
                 header.level,
                 payload,
-                &mut *stream.writer,
+                &mut buf,
             );
+            let _ = stream.writer.write_all(&buf);
             had_work = true;
             // ReadClaim dropped here -> region zeroed, head advanced
         }
@@ -63,12 +70,14 @@ pub(crate) fn archiver_loop(
     while let Some(claim) = stream.consumer.try_claim() {
         let header = record::read_header(&claim);
         let payload = &claim[record::HEADER_SIZE..];
+        buf.clear();
         (header.formatter)(
             header.timestamp_ns,
             header.level,
             payload,
-            &mut *stream.writer,
+            &mut buf,
         );
+        let _ = stream.writer.write_all(&buf);
     }
     let _ = stream.writer.flush();
 }
