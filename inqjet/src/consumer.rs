@@ -40,12 +40,7 @@ pub(crate) fn archiver_loop(
             let header = record::read_header(&claim);
             let payload = &claim[record::HEADER_SIZE..];
             buf.clear();
-            (header.formatter)(
-                header.timestamp_ns,
-                header.level,
-                payload,
-                &mut buf,
-            );
+            (header.formatter)(header.timestamp_ns, header.level, payload, &mut buf);
             let _ = stream.writer.write_all(&buf);
             had_work = true;
             // ReadClaim dropped here -> region zeroed, head advanced
@@ -71,12 +66,7 @@ pub(crate) fn archiver_loop(
         let header = record::read_header(&claim);
         let payload = &claim[record::HEADER_SIZE..];
         buf.clear();
-        (header.formatter)(
-            header.timestamp_ns,
-            header.level,
-            payload,
-            &mut buf,
-        );
+        (header.formatter)(header.timestamp_ns, header.level, payload, &mut buf);
         let _ = stream.writer.write_all(&buf);
     }
     let _ = stream.writer.flush();

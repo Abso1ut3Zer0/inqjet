@@ -45,10 +45,6 @@ pub(crate) struct LoggerState {
     /// Unparker for waking the archiver thread.
     pub unparker: Unparker,
 
-    /// Global level filter (used by the `log` crate bridge).
-    #[cfg(feature = "log-compat")]
-    pub max_level: crate::LevelFilter,
-
     /// Backpressure strategy when the ring buffer is full.
     pub backpressure: crate::BackpressureMode,
 
@@ -159,6 +155,9 @@ pub(crate) fn log_impl(level: u8, target: &str, line: u32, args: std::fmt::Argum
                     Err(nexus_logbuf::TryClaimError::Full) => match state.backpressure {
                         crate::BackpressureMode::Drop => return,
                         crate::BackpressureMode::Backoff => {
+                            if !state.running.load(Ordering::Relaxed) {
+                                return;
+                            }
                             state.unparker.unpark();
                             backoff.snooze();
                         }
@@ -220,6 +219,9 @@ pub(crate) fn hot_log_submit(
                 Err(nexus_logbuf::TryClaimError::Full) => match state.backpressure {
                     crate::BackpressureMode::Drop => return,
                     crate::BackpressureMode::Backoff => {
+                        if !state.running.load(Ordering::Relaxed) {
+                            return;
+                        }
                         state.unparker.unpark();
                         backoff.snooze();
                     }
@@ -239,19 +241,11 @@ pub(crate) struct Logger;
 #[cfg(feature = "log-compat")]
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
-        LOGGER
-            .get()
-            .map(|s| level_to_u8(metadata.level()) <= s.max_level.as_u8())
-            .unwrap_or(false)
+        level_to_u8(metadata.level()) <= MAX_LEVEL.load(Ordering::Relaxed)
     }
 
     fn log(&self, record: &log::Record) {
-        let state = match LOGGER.get() {
-            Some(s) => s,
-            None => return,
-        };
-
-        if level_to_u8(record.level()) > state.max_level.as_u8() {
+        if !log_enabled(level_to_u8(record.level())) {
             return;
         }
 

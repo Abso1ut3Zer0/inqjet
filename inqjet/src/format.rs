@@ -39,6 +39,11 @@ fn level_str(level: u8) -> &'static str {
 
 /// Snaps current time as u64 nanoseconds since Unix epoch.
 ///
+/// Uses `SystemTime::now()` which is **not monotonic** — it can jump
+/// backwards on NTP adjustments. Timestamps are for human-readable
+/// output, not ordering guarantees. If you need monotonic ordering,
+/// use the record's position in the ring buffer.
+///
 /// u64 nanos overflow in ~584 years (year ~2554). Current timestamps
 /// use ~1.7e18 of the 1.8e19 capacity.
 pub(crate) fn snap_timestamp() -> u64 {

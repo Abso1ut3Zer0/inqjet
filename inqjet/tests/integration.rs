@@ -132,9 +132,9 @@ fn standalone_macros() {
 
     // MAX_LEVEL is Trace (5). Verify the gate function matches:
     // levels 1-5 are enabled, level 6+ is not.
-    assert!(inqjet::__log_enabled(1)); // Error: enabled at Trace
-    assert!(inqjet::__log_enabled(5)); // Trace: enabled at Trace
-    assert!(!inqjet::__log_enabled(6)); // Above Trace: disabled
+    assert!(inqjet::__private::log_enabled(1)); // Error: enabled at Trace
+    assert!(inqjet::__private::log_enabled(5)); // Trace: enabled at Trace
+    assert!(!inqjet::__private::log_enabled(6)); // Above Trace: disabled
 
     // -- Level filtering: filtered messages absent ---------------------------
 

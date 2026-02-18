@@ -36,10 +36,11 @@ use crate::logger::{LOGGER, LoggerState};
 pub(crate) mod consumer;
 pub(crate) mod format;
 pub(crate) mod logger;
-pub mod pod;
+pub(crate) mod pod;
 pub(crate) mod record;
 
 pub use pod::Pod;
+pub use pod::reserve_fallback_capacity;
 
 // -- Log levels ---------------------------------------------------------------
 
@@ -59,6 +60,7 @@ pub use pod::Pod;
 ///     .build()?;
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[non_exhaustive]
 pub enum LevelFilter {
     /// No messages will be logged.
     Off = 0,
@@ -115,50 +117,43 @@ pub use inqjet_macros::Pod;
 #[doc(hidden)]
 pub use inqjet_macros::__hot_log;
 
-// -- Standalone macro support ------------------------------------------------
+// -- Macro internals (not public API) ----------------------------------------
 
-/// Level gate for standalone macros. Not public API.
-#[doc(hidden)]
-#[inline]
-pub fn __log_enabled(level: u8) -> bool {
-    logger::log_enabled(level)
-}
-
-/// Writes the log line prefix (timestamp, level, target:line). Not public API.
+/// Implementation details used by proc macro-generated code.
 ///
-/// Called by proc macro-generated format functions on the consumer thread.
+/// **Not public API.** Any item in this module may change or disappear
+/// in any release. Do not depend on it.
 #[doc(hidden)]
-pub fn __write_log_prefix(
-    timestamp_ns: u64,
-    level: u8,
-    target: &str,
-    line: u32,
-    out: &mut dyn std::io::Write,
-) {
-    format::write_log_prefix(timestamp_ns, level, target, line, out)
-}
+pub mod __private {
+    pub use crate::pod::{HotArg, HotDecode, HotEncode, PreFormatted, PreFormattedValue, Witness};
 
-/// Clears the fallback stash. Not public API.
-///
-/// Called by proc macro-generated code at the start of each log block
-/// to reset the TLS stash before new fallback-formatted values are written.
-#[doc(hidden)]
-pub fn __fallback_stash_clear() {
-    pod::fallback_stash_clear()
-}
+    #[inline]
+    pub fn log_enabled(level: u8) -> bool {
+        crate::logger::log_enabled(level)
+    }
 
-/// Hot-path log submission. Not public API.
-///
-/// Called by proc macro-generated code to write encoded payloads
-/// to the logbuf with a consumer-side format function.
-#[doc(hidden)]
-pub fn __hot_log_submit(
-    level: u8,
-    payload_size: usize,
-    fmt_fn: fn(u64, u8, &[u8], &mut dyn std::io::Write),
-    encode: impl FnOnce(&mut [u8]),
-) {
-    logger::hot_log_submit(level, payload_size, fmt_fn, encode)
+    pub fn write_log_prefix(
+        timestamp_ns: u64,
+        level: u8,
+        target: &str,
+        line: u32,
+        out: &mut dyn std::io::Write,
+    ) {
+        crate::format::write_log_prefix(timestamp_ns, level, target, line, out)
+    }
+
+    pub fn fallback_stash_clear() {
+        crate::pod::fallback_stash_clear()
+    }
+
+    pub fn hot_log_submit(
+        level: u8,
+        payload_size: usize,
+        fmt_fn: fn(u64, u8, &[u8], &mut dyn std::io::Write),
+        encode: impl FnOnce(&mut [u8]),
+    ) {
+        crate::logger::hot_log_submit(level, payload_size, fmt_fn, encode)
+    }
 }
 
 /// Log at the ERROR level.
@@ -175,12 +170,12 @@ pub fn __hot_log_submit(
 #[macro_export]
 macro_rules! error {
     (target: $target:expr, $($arg:tt)+) => {
-        if $crate::__log_enabled(1) {
+        if $crate::__private::log_enabled(1) {
             $crate::__hot_log!(1u8, $target, line!(), $($arg)+)
         }
     };
     ($($arg:tt)+) => {
-        if $crate::__log_enabled(1) {
+        if $crate::__private::log_enabled(1) {
             $crate::__hot_log!(1u8, module_path!(), line!(), $($arg)+)
         }
     };
@@ -199,12 +194,12 @@ macro_rules! error {
 #[macro_export]
 macro_rules! warn {
     (target: $target:expr, $($arg:tt)+) => {
-        if $crate::__log_enabled(2) {
+        if $crate::__private::log_enabled(2) {
             $crate::__hot_log!(2u8, $target, line!(), $($arg)+)
         }
     };
     ($($arg:tt)+) => {
-        if $crate::__log_enabled(2) {
+        if $crate::__private::log_enabled(2) {
             $crate::__hot_log!(2u8, module_path!(), line!(), $($arg)+)
         }
     };
@@ -223,12 +218,12 @@ macro_rules! warn {
 #[macro_export]
 macro_rules! info {
     (target: $target:expr, $($arg:tt)+) => {
-        if $crate::__log_enabled(3) {
+        if $crate::__private::log_enabled(3) {
             $crate::__hot_log!(3u8, $target, line!(), $($arg)+)
         }
     };
     ($($arg:tt)+) => {
-        if $crate::__log_enabled(3) {
+        if $crate::__private::log_enabled(3) {
             $crate::__hot_log!(3u8, module_path!(), line!(), $($arg)+)
         }
     };
@@ -247,12 +242,12 @@ macro_rules! info {
 #[macro_export]
 macro_rules! debug {
     (target: $target:expr, $($arg:tt)+) => {
-        if $crate::__log_enabled(4) {
+        if $crate::__private::log_enabled(4) {
             $crate::__hot_log!(4u8, $target, line!(), $($arg)+)
         }
     };
     ($($arg:tt)+) => {
-        if $crate::__log_enabled(4) {
+        if $crate::__private::log_enabled(4) {
             $crate::__hot_log!(4u8, module_path!(), line!(), $($arg)+)
         }
     };
@@ -271,12 +266,12 @@ macro_rules! debug {
 #[macro_export]
 macro_rules! trace {
     (target: $target:expr, $($arg:tt)+) => {
-        if $crate::__log_enabled(5) {
+        if $crate::__private::log_enabled(5) {
             $crate::__hot_log!(5u8, $target, line!(), $($arg)+)
         }
     };
     ($($arg:tt)+) => {
-        if $crate::__log_enabled(5) {
+        if $crate::__private::log_enabled(5) {
             $crate::__hot_log!(5u8, module_path!(), line!(), $($arg)+)
         }
     };
@@ -289,6 +284,8 @@ const DEFAULT_CAPACITY: usize = 65_536;
 const DEFAULT_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(5);
 
 /// Controls ANSI color output.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum ColorMode {
     /// Enable colors if stdout is a terminal, `NO_COLOR` is unset, and
     /// `TERM` is not `"dumb"`.
@@ -301,6 +298,7 @@ pub enum ColorMode {
 
 /// Controls producer behavior when the ring buffer is full.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum BackpressureMode {
     /// Exponential backoff via `crossbeam::Backoff::snooze()`.
     ///
@@ -351,14 +349,26 @@ impl Drop for InqJetGuard {
     }
 }
 
+impl std::fmt::Debug for InqJetGuard {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InqJetGuard")
+            .field("running", &self.running.load(Ordering::Relaxed))
+            .finish_non_exhaustive()
+    }
+}
+
 /// Errors during logger initialization.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum InqJetBuilderError {
     #[error("no configured writer for appender")]
     NoConfiguredWriter,
 
     #[error("no configured log level")]
     NoConfiguredLogLevel,
+
+    #[error("logger already initialized (build() called more than once)")]
+    AlreadyInitialized,
 
     #[error("io error: {0}")]
     IoError(#[from] io::Error),
@@ -380,6 +390,19 @@ pub struct InqJetBuilder<W> {
     backpressure: BackpressureMode,
 }
 
+impl<W> std::fmt::Debug for InqJetBuilder<W> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InqJetBuilder")
+            .field("writer", &self.wr.as_ref().map(|_| "..."))
+            .field("level", &self.level)
+            .field("buffer_size", &self.cap)
+            .field("timeout", &self.timeout)
+            .field("color_mode", &self.color_mode)
+            .field("backpressure", &self.backpressure)
+            .finish()
+    }
+}
+
 impl<W> Default for InqJetBuilder<W> {
     fn default() -> Self {
         Self {
@@ -398,6 +421,7 @@ where
     W: io::Write + Send + 'static,
 {
     /// Sets the output writer for log messages.
+    #[must_use]
     pub fn with_writer(mut self, wr: W) -> Self {
         self.wr = Some(wr);
         self
@@ -407,12 +431,14 @@ where
     ///
     /// Rounded up to the next power of two by nexus-logbuf.
     /// Default: 65536 (64KB).
+    #[must_use]
     pub fn with_buffer_size(mut self, cap: usize) -> Self {
         self.cap = Some(cap);
         self
     }
 
     /// Sets the maximum log level to process.
+    #[must_use]
     pub fn with_log_level(mut self, level: LevelFilter) -> Self {
         self.level = Some(level);
         self
@@ -422,12 +448,14 @@ where
     ///
     /// - `Some(duration)`: Park with timeout, periodic wakeups
     /// - `None`: Busy spin (highest CPU, lowest latency)
+    #[must_use]
     pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
         self.timeout = timeout;
         self
     }
 
     /// Sets the color mode for log output.
+    #[must_use]
     pub fn with_color_mode(mut self, color_mode: ColorMode) -> Self {
         self.color_mode = color_mode;
         self
@@ -436,6 +464,7 @@ where
     /// Sets the backpressure strategy when the ring buffer is full.
     ///
     /// Default: [`BackpressureMode::Backoff`].
+    #[must_use]
     pub fn with_backpressure(mut self, mode: BackpressureMode) -> Self {
         self.backpressure = mode;
         self
@@ -446,6 +475,9 @@ where
     ///
     /// Returns a guard that shuts down the logger when dropped.
     pub fn build(self) -> Result<InqJetGuard, InqJetBuilderError> {
+        if LOGGER.get().is_some() {
+            return Err(InqJetBuilderError::AlreadyInitialized);
+        }
         let capacity = self.cap.unwrap_or(DEFAULT_CAPACITY);
         let writer = self.wr.ok_or(InqJetBuilderError::NoConfiguredWriter)?;
         let level = self.level.ok_or(InqJetBuilderError::NoConfiguredLogLevel)?;
@@ -473,8 +505,6 @@ where
         let _ = LOGGER.set(LoggerState {
             source_producer: producer,
             unparker: unparker.clone(),
-            #[cfg(feature = "log-compat")]
-            max_level: level,
             backpressure: self.backpressure,
             running: running.clone(),
         });
@@ -503,7 +533,7 @@ fn is_color_enabled(color_mode: ColorMode) -> bool {
             if !std::io::stdout().is_terminal() {
                 return false;
             }
-            if std::env::var("NO_COLOR").is_ok() {
+            if std::env::var_os("NO_COLOR").is_some() {
                 return false;
             }
             if let Ok(term) = std::env::var("TERM")

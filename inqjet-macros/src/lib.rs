@@ -173,7 +173,7 @@ fn extra_trait_bound(ft: FormatTrait, type_param: &proc_macro2::Ident) -> Option
         FormatTrait::Pointer => quote!(::std::fmt::Pointer),
         FormatTrait::Debug => unreachable!(),
     };
-    Some(quote! { <#type_param as ::inqjet::pod::HotDecode>::Decoded: #trait_path })
+    Some(quote! { <#type_param as ::inqjet::__private::HotDecode>::Decoded: #trait_path })
 }
 
 fn generate(input: &HotLogInput) -> TokenStream2 {
@@ -256,7 +256,7 @@ fn generate(input: &HotLogInput) -> TokenStream2 {
                     _ts: u64, _level: u8, __payload: &[u8], out: &mut dyn ::std::io::Write,
                 ) {
                     #prefix_decode
-                    ::inqjet::__write_log_prefix(_ts, _level, __target, __line, out);
+                    ::inqjet::__private::write_log_prefix(_ts, _level, __target, __line, out);
                     writeln!(out, #fmt_str).ok();
                 }
                 __fmt
@@ -265,12 +265,12 @@ fn generate(input: &HotLogInput) -> TokenStream2 {
         }
     } else {
         quote! {
-            fn __make_fmt<#(#tp: ::inqjet::pod::HotDecode),*>(
-                #(_: ::inqjet::pod::Witness<#tp>),*
+            fn __make_fmt<#(#tp: ::inqjet::__private::HotDecode),*>(
+                #(_: ::inqjet::__private::Witness<#tp>),*
             ) -> fn(u64, u8, &[u8], &mut dyn ::std::io::Write)
             #where_clause
             {
-                fn __fmt<#(#tp: ::inqjet::pod::HotDecode),*>(
+                fn __fmt<#(#tp: ::inqjet::__private::HotDecode),*>(
                     _ts: u64, _level: u8, __payload: &[u8], out: &mut dyn ::std::io::Write,
                 )
                 #where_clause2
@@ -279,18 +279,18 @@ fn generate(input: &HotLogInput) -> TokenStream2 {
                     let mut __off = 6usize + __tl;
                     #(
                         let (#dn, __n) =
-                            <#tp as ::inqjet::pod::HotDecode>::hot_decode(
+                            <#tp as ::inqjet::__private::HotDecode>::hot_decode(
                                 &__payload[__off..]
                             );
                         __off += __n;
                     )*
                     let _ = __off;
-                    ::inqjet::__write_log_prefix(_ts, _level, __target, __line, out);
+                    ::inqjet::__private::write_log_prefix(_ts, _level, __target, __line, out);
                     writeln!(out, #fmt_str, #(#dn),*).ok();
                 }
                 __fmt::<#(#tp),*>
             }
-            #(let #wn = (&::inqjet::pod::HotArg(#vn)).hot_witness();)*
+            #(let #wn = (&::inqjet::__private::HotArg(#vn)).hot_witness();)*
             let __fmt_fn = __make_fmt(#(#wn),*);
         }
     };
@@ -315,7 +315,7 @@ fn generate(input: &HotLogInput) -> TokenStream2 {
                 #prefix_encode
                 let mut __off = 6usize + __target_bytes.len();
                 #(
-                    (&::inqjet::pod::HotArg(#vn)).hot_encode(&mut __buf[__off..]);
+                    (&::inqjet::__private::HotArg(#vn)).hot_encode(&mut __buf[__off..]);
                     __off += #sn;
                 )*
                 let _ = __off;
@@ -338,17 +338,17 @@ fn generate(input: &HotLogInput) -> TokenStream2 {
                 #prefix_setup
                 let __total = __prefix_size;
                 #witness_block
-                ::inqjet::__hot_log_submit(#level, __total, __fmt_fn, #encode_block);
+                ::inqjet::__private::hot_log_submit(#level, __total, __fmt_fn, #encode_block);
             }
         }
     } else {
         quote! {
             {
-                use ::inqjet::pod::HotEncode as _;
-                ::inqjet::__fallback_stash_clear();
+                use ::inqjet::__private::HotEncode as _;
+                ::inqjet::__private::fallback_stash_clear();
                 #prefix_setup
                 #(let #vn = &(#args);)*
-                #(let #sn = (&::inqjet::pod::HotArg(#vn)).hot_size_with(
+                #(let #sn = (&::inqjet::__private::HotArg(#vn)).hot_size_with(
                     |__stash: &mut ::std::string::String| {
                         use ::std::fmt::Write;
                         write!(__stash, #closure_fmts, #vn).ok();
@@ -356,7 +356,7 @@ fn generate(input: &HotLogInput) -> TokenStream2 {
                 );)*
                 let __total = __prefix_size + #arg_size_expr;
                 #witness_block
-                ::inqjet::__hot_log_submit(#level, __total, __fmt_fn, #encode_block);
+                ::inqjet::__private::hot_log_submit(#level, __total, __fmt_fn, #encode_block);
             }
         }
     }

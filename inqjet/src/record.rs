@@ -41,7 +41,7 @@ pub(crate) struct RecordHeader {
 /// Source is a repr(C) struct in the same binary. No alignment requirement
 /// on the destination (byte-level copy).
 pub(crate) fn write_header(buf: &mut [u8], header: &RecordHeader) {
-    debug_assert!(buf.len() >= HEADER_SIZE);
+    assert!(buf.len() >= HEADER_SIZE);
     // SAFETY: RecordHeader is repr(C), copied as raw bytes into a buffer
     // we own (the logbuf WriteClaim). Both source and destination are valid
     // for HEADER_SIZE bytes. Destination has no alignment requirement
@@ -63,7 +63,7 @@ pub(crate) fn write_header(buf: &mut [u8], header: &RecordHeader) {
 /// matches nexus-logbuf's record alignment, but `read_unaligned` is
 /// zero-cost on x86-64 and removes any need to reason about alignment.
 pub(crate) fn read_header(buf: &[u8]) -> RecordHeader {
-    debug_assert!(buf.len() >= HEADER_SIZE);
+    assert!(buf.len() >= HEADER_SIZE);
     // SAFETY: Buffer was written by write_header in the same binary, so
     // layout matches. read_unaligned is used defensively (zero-cost on
     // x86-64, same as aligned read).
@@ -93,7 +93,7 @@ pub(crate) fn write_standard_payload(
 ) -> usize {
     let tb = target.as_bytes();
     let mb = message.as_bytes();
-    debug_assert!(
+    assert!(
         tb.len() <= u16::MAX as usize,
         "target string exceeds u16::MAX bytes ({})",
         tb.len()
