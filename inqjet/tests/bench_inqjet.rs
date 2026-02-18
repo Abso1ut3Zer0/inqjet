@@ -8,11 +8,11 @@
 //! cargo test -p inqjet --release bench_inqjet -- --ignored --nocapture
 //! ```
 
-use std::io::BufWriter;
+use std::io::{BufWriter, Write};
 use std::time::{Duration, Instant};
 
 use hdrhistogram::Histogram;
-use inqjet::{ColorMode, InqJetBuilder, LevelFilter};
+use inqjet::{ArchiveTag, ColorMode, InqJetBuilder, LevelFilter};
 
 const USERS: &[&str] = &["alice", "bob", "charlie", "diana", "eve"];
 const PATHS: &[&str] = &["/api/v1/users", "/api/v1/orders", "/health", "/api/v2/data"];
@@ -21,6 +21,44 @@ const ACTIONS: &[&str] = &["read", "write", "delete", "update"];
 
 fn make_sessions(n: usize) -> Vec<String> {
     (0..n).map(|i| format!("sess-{:08x}", i * 7 + 13)).collect()
+}
+
+// -- Archive tag types for benchmarking --
+
+#[derive(Clone, Copy)]
+struct SimpleTag(&'static str);
+
+impl ArchiveTag for SimpleTag {
+    fn write_label(&self, out: &mut dyn Write) {
+        let _ = out.write_all(self.0.as_bytes());
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Direction {
+    Inbound,
+    Outbound,
+}
+
+impl Direction {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Direction::Inbound => "INBOUND",
+            Direction::Outbound => "OUTBOUND",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct VenueEvent {
+    venue: &'static str,
+    direction: Direction,
+}
+
+impl ArchiveTag for VenueEvent {
+    fn write_label(&self, out: &mut dyn Write) {
+        let _ = write!(out, "{} {}", self.venue, self.direction.as_str());
+    }
 }
 
 macro_rules! bench {
@@ -82,14 +120,32 @@ fn bench_inqjet() {
         .write(true)
         .open(&tmp)
         .unwrap();
-    let _guard = InqJetBuilder::default()
+
+    let archive_tmp = std::env::temp_dir().join("inqjet_archive_bench.log");
+    let archive_file = std::fs::OpenOptions::new()
+        .truncate(true)
+        .create(true)
+        .write(true)
+        .open(&archive_tmp)
+        .unwrap();
+
+    let mut builder = InqJetBuilder::default()
         .with_writer(BufWriter::new(file))
         .with_log_level(LevelFilter::Trace)
         .with_buffer_size(1 << 20) // 1MB ring buffer
         .with_timeout(None) // busy-spin consumer
-        .with_color_mode(ColorMode::Never)
-        .build()
-        .unwrap();
+        .with_color_mode(ColorMode::Never);
+
+    let mut simple_archive = builder.add_archive::<SimpleTag>(
+        BufWriter::new(archive_file),
+        1 << 20,
+    );
+    let mut venue_archive = builder.add_archive::<VenueEvent>(
+        std::io::sink(),
+        1 << 20,
+    );
+
+    let _guard = builder.build().unwrap();
 
     std::thread::sleep(Duration::from_millis(200));
 
@@ -174,4 +230,33 @@ fn bench_inqjet() {
     });
 
     print_table("InqJet Scenario Results (producer-side latency)", &results);
+
+    // -- Archive benchmarks --------------------------------------------------
+    let small_payload = b"heartbeat";
+    let fix_payload = b"8=FIX.4.4|9=148|35=D|49=SENDER|56=TARGET|34=12345|52=20240115-14:30:45.123|55=BTC-USD|54=1|44=42000.50|38=1.5|40=2|10=042|";
+
+    let mut archive_results: Vec<(&str, Histogram<u64>)> = Vec::new();
+
+    // 12. Simple tag + small payload (heartbeat)
+    bench!("archive_simple", archive_results, n, |i| {
+        simple_archive.write(SimpleTag("HEARTBEAT"), small_payload)
+    });
+
+    // 13. Composite tag + small payload
+    bench!("archive_venue_small", archive_results, n, |i| {
+        venue_archive.write(
+            VenueEvent { venue: "BINANCE", direction: Direction::Inbound },
+            small_payload,
+        )
+    });
+
+    // 14. Composite tag + FIX-sized payload (~140 bytes)
+    bench!("archive_venue_fix", archive_results, n, |i| {
+        venue_archive.write(
+            VenueEvent { venue: "BINANCE", direction: Direction::Outbound },
+            fix_payload,
+        )
+    });
+
+    print_table("InqJet Archive Results (producer-side latency)", &archive_results);
 }

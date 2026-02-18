@@ -33,12 +33,14 @@ use std::sync::{
 use crate::consumer::Stream;
 use crate::logger::{LOGGER, LoggerState};
 
+pub(crate) mod archive;
 pub(crate) mod consumer;
 pub(crate) mod format;
 pub(crate) mod logger;
 pub(crate) mod pod;
 pub(crate) mod record;
 
+pub use archive::{ArchiveHandle, ArchiveTag};
 pub use pod::Pod;
 pub use pod::reserve_fallback_capacity;
 
@@ -389,6 +391,7 @@ pub struct InqJetBuilder<W> {
     timeout: Option<std::time::Duration>,
     color_mode: ColorMode,
     backpressure: BackpressureMode,
+    archives: Vec<archive::ArchiveStream>,
 }
 
 impl<W> std::fmt::Debug for InqJetBuilder<W> {
@@ -400,6 +403,7 @@ impl<W> std::fmt::Debug for InqJetBuilder<W> {
             .field("timeout", &self.timeout)
             .field("color_mode", &self.color_mode)
             .field("backpressure", &self.backpressure)
+            .field("archives", &self.archives.len())
             .finish()
     }
 }
@@ -413,6 +417,7 @@ impl<W> Default for InqJetBuilder<W> {
             timeout: Some(DEFAULT_TIMEOUT),
             color_mode: ColorMode::Auto,
             backpressure: BackpressureMode::Backoff,
+            archives: Vec::new(),
         }
     }
 }
@@ -471,6 +476,40 @@ where
         self
     }
 
+    /// Registers an archive stream with its own dedicated ring buffer.
+    ///
+    /// Returns a handle for writing archive records. The handle is `Clone` —
+    /// clone it for use across multiple threads.
+    ///
+    /// Archive records are silently dropped if the ring buffer is full.
+    /// Size the buffer for your expected throughput.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let mut builder = InqJetBuilder::default()
+    ///     .with_writer(std::io::stdout())
+    ///     .with_log_level(LevelFilter::Info);
+    ///
+    /// let mut archive = builder.add_archive::<VenueEvent>(file, 65536);
+    /// let _guard = builder.build()?;
+    ///
+    /// archive.write(&VenueEvent { venue: "BINANCE", direction: Direction::Inbound }, b"data");
+    /// ```
+    pub fn add_archive<T: ArchiveTag>(
+        &mut self,
+        writer: impl io::Write + Send + 'static,
+        buffer_size: usize,
+    ) -> ArchiveHandle<T> {
+        let (producer, consumer) = nexus_logbuf::queue::mpsc::new(buffer_size);
+        self.archives.push(archive::ArchiveStream {
+            consumer,
+            writer: Box::new(writer),
+            format_fn: archive::archive_format_fn::<T>,
+        });
+        ArchiveHandle::new(producer)
+    }
+
     /// Builds the logger, spawns the archiver thread, and registers
     /// as the global `log` crate logger.
     ///
@@ -492,6 +531,7 @@ where
             consumer,
             writer: Box::new(writer),
         };
+        let mut archives = self.archives;
 
         let parker = Parker::new();
         let unparker = parker.unparker().clone();
@@ -500,7 +540,13 @@ where
         let running_archiver = running.clone();
 
         let handle = std::thread::spawn(move || {
-            crate::consumer::archiver_loop(&mut stream, &running_archiver, timeout, parker);
+            crate::consumer::archiver_loop(
+                &mut stream,
+                &mut archives,
+                &running_archiver,
+                timeout,
+                parker,
+            );
         });
 
         let _ = LOGGER.set(LoggerState {

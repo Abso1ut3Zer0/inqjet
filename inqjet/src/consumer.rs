@@ -1,7 +1,7 @@
 //! Consumer-side archiver loop.
 //!
-//! Single background thread polls the logbuf for records, reads the
-//! RecordHeader, and calls the format function to write output.
+//! Single background thread polls the log stream and any archive streams
+//! for records, reads headers, and calls format functions to write output.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -9,6 +9,7 @@ use std::time::Duration;
 use crossbeam_utils::sync::Parker;
 use nexus_logbuf::queue::mpsc;
 
+use crate::archive::ArchiveStream;
 use crate::record::{self, FormatContext};
 
 /// A logbuf consumer paired with its output writer.
@@ -17,13 +18,14 @@ pub(crate) struct Stream {
     pub writer: Box<dyn std::io::Write + Send>,
 }
 
-/// Runs the archiver loop, polling the stream for records.
+/// Runs the archiver loop, polling the log stream and archive streams.
 ///
-/// Reads records from the logbuf, calls the format function from each
-/// record header to write formatted output to the stream's writer.
-/// Parks with timeout when idle. Drains all remaining records on shutdown.
+/// Reads records from each stream's ring buffer and calls the appropriate
+/// format function. Parks with timeout when idle. Drains all remaining
+/// records on shutdown.
 pub(crate) fn archiver_loop(
     stream: &mut Stream,
+    archives: &mut [ArchiveStream],
     running: &AtomicBool,
     timeout: Option<Duration>,
     parker: Parker,
@@ -36,6 +38,7 @@ pub(crate) fn archiver_loop(
     while running.load(Ordering::Relaxed) {
         let mut had_work = false;
 
+        // Poll log stream
         while let Some(claim) = stream.consumer.try_claim() {
             let header = record::read_header(&claim);
             buf.clear();
@@ -50,8 +53,21 @@ pub(crate) fn archiver_loop(
             // ReadClaim dropped here -> region zeroed, head advanced
         }
 
+        // Poll archive streams
+        for archive in archives.iter_mut() {
+            while let Some(claim) = archive.consumer.try_claim() {
+                buf.clear();
+                (archive.format_fn)(&claim, &mut buf);
+                let _ = archive.writer.write_all(&buf);
+                had_work = true;
+            }
+        }
+
         if had_work {
             let _ = stream.writer.flush();
+            for archive in archives.iter_mut() {
+                let _ = archive.writer.flush();
+            }
         } else {
             match timeout {
                 Some(dur) => parker.park_timeout(dur),
@@ -78,4 +94,13 @@ pub(crate) fn archiver_loop(
         let _ = stream.writer.write_all(&buf);
     }
     let _ = stream.writer.flush();
+
+    for archive in archives.iter_mut() {
+        while let Some(claim) = archive.consumer.try_claim() {
+            buf.clear();
+            (archive.format_fn)(&claim, &mut buf);
+            let _ = archive.writer.write_all(&buf);
+        }
+        let _ = archive.writer.flush();
+    }
 }

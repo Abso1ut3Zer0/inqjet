@@ -165,6 +165,71 @@ let _guard = InqJetBuilder::default()
     .build()?;
 ```
 
+## Archive Streams
+
+Separate ring buffers for structured event archival — like FIX session logs.
+Each archive stream has its own writer, independent of the main log output.
+
+```rust
+use inqjet::{ArchiveTag, InqJetBuilder, LevelFilter};
+use std::io::Write;
+
+#[derive(Clone, Copy)]
+enum Direction { Inbound, Outbound }
+
+impl Direction {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Direction::Inbound => "INBOUND",
+            Direction::Outbound => "OUTBOUND",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct VenueEvent {
+    venue: &'static str,
+    direction: Direction,
+}
+
+impl ArchiveTag for VenueEvent {
+    fn write_label(&self, out: &mut dyn Write) {
+        let _ = write!(out, "{} {}", self.venue, self.direction.as_str());
+    }
+}
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let archive_file = std::fs::File::create("binance.log")?;
+
+    let mut builder = InqJetBuilder::default()
+        .with_writer(std::io::stdout())
+        .with_log_level(LevelFilter::Info);
+
+    let mut archive = builder.add_archive::<VenueEvent>(archive_file, 65536);
+    let _guard = builder.build()?;
+
+    // Normal logging → stdout
+    inqjet::info!("server started");
+
+    // Archive records → binance.log
+    archive.write(
+        VenueEvent { venue: "BINANCE", direction: Direction::Inbound },
+        b"8=FIX.4.4|35=W|55=BTC-USD|270=42000.50",
+    );
+
+    Ok(())
+}
+```
+
+Output in `binance.log`:
+```
+2024-01-15T14:30:45.123456789Z [BINANCE INBOUND] 8=FIX.4.4|35=W|55=BTC-USD|270=42000.50
+```
+
+The tag is memcpy'd as raw bytes through the ring buffer. `write_label` runs on
+the background archiver thread — never on the hot path. Clone the handle for
+use across multiple threads.
+
 ### Runtime Level Adjustment
 
 ```rust
