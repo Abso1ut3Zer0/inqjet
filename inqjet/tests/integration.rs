@@ -8,9 +8,7 @@
 use std::io::{self, Write};
 use std::sync::{Arc, Mutex};
 
-use log::LevelFilter;
-
-use inqjet::{ColorMode, InqJetBuilder};
+use inqjet::{ColorMode, InqJetBuilder, LevelFilter};
 
 /// Shared writer that captures output for assertions.
 #[derive(Clone)]

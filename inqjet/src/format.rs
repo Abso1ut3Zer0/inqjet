@@ -7,6 +7,7 @@
 use std::io::Write;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+#[cfg(any(feature = "log-compat", test))]
 use crate::record;
 
 /// Global color flag, set once at initialization.
@@ -87,6 +88,8 @@ fn civil_from_days(days: i32) -> (i32, u32, u32) {
 
 /// Standard format function for records produced via `format_args!()`.
 ///
+/// Only used by the `log` crate bridge path (`log_impl`).
+///
 /// Payload layout:
 /// ```text
 /// [line: u32 LE][target_len: u16 LE][target bytes][message bytes]
@@ -96,6 +99,7 @@ fn civil_from_days(days: i32) -> (i32, u32, u32) {
 /// ```text
 /// 2024-01-15T14:30:45.123456789Z [INFO] my_app::module:42 message text
 /// ```
+#[cfg(feature = "log-compat")]
 pub(crate) fn standard_format_fn(
     timestamp_ns: u64,
     level: u8,
@@ -106,16 +110,18 @@ pub(crate) fn standard_format_fn(
     format_record(timestamp_ns, level, payload, out, colored);
 }
 
-/// Inner formatting logic, takes an explicit color flag for testability.
-pub(crate) fn format_record(
+/// Writes the log line prefix: `timestamp [LEVEL] target:line `.
+///
+/// Includes a trailing space. The caller appends the message and newline.
+/// Used by both the standard format path and hot-path generated format functions.
+fn write_prefix_inner(
     timestamp_ns: u64,
     level: u8,
-    payload: &[u8],
+    target: &str,
+    line: u32,
     out: &mut dyn Write,
     colored: bool,
 ) {
-    let (line, target, message) = record::read_standard_payload(payload);
-
     if colored {
         let _ = out.write_all(GRAY);
         format_timestamp(timestamp_ns, out);
@@ -135,22 +141,43 @@ pub(crate) fn format_record(
         }
         let _ = out.write_all(RESET);
 
-        let _ = writeln!(out, " {}", message);
+        let _ = out.write_all(b" ");
     } else {
         format_timestamp(timestamp_ns, out);
         if line > 0 {
-            let _ = writeln!(
-                out,
-                " [{}] {}:{} {}",
-                level_str(level),
-                target,
-                line,
-                message
-            );
+            let _ = write!(out, " [{}] {}:{} ", level_str(level), target, line);
         } else {
-            let _ = writeln!(out, " [{}] {} {}", level_str(level), target, message);
+            let _ = write!(out, " [{}] {} ", level_str(level), target);
         }
     }
+}
+
+/// Writes the log line prefix, reading color mode from the global flag.
+///
+/// Called by proc macro-generated format functions on the consumer thread.
+pub(crate) fn write_log_prefix(
+    timestamp_ns: u64,
+    level: u8,
+    target: &str,
+    line: u32,
+    out: &mut dyn Write,
+) {
+    let colored = COLOR_ENABLED.load(Ordering::Relaxed);
+    write_prefix_inner(timestamp_ns, level, target, line, out, colored);
+}
+
+/// Inner formatting logic, takes an explicit color flag for testability.
+#[cfg(any(feature = "log-compat", test))]
+pub(crate) fn format_record(
+    timestamp_ns: u64,
+    level: u8,
+    payload: &[u8],
+    out: &mut dyn Write,
+    colored: bool,
+) {
+    let (line, target, message) = record::read_standard_payload(payload);
+    write_prefix_inner(timestamp_ns, level, target, line, out, colored);
+    let _ = writeln!(out, "{}", message);
 }
 
 #[cfg(test)]

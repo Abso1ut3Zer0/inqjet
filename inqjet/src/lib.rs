@@ -25,15 +25,14 @@
 //! ```
 
 use crossbeam_utils::sync::{Parker, Unparker};
-use log::LevelFilter;
 use std::io::{self, IsTerminal};
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 use crate::consumer::Stream;
-use crate::logger::{Logger, LoggerState, LOGGER};
+use crate::logger::{LOGGER, LoggerState};
 
 pub(crate) mod consumer;
 pub(crate) mod format;
@@ -41,7 +40,81 @@ pub(crate) mod logger;
 pub mod pod;
 pub(crate) mod record;
 
-pub use pod::InqJetPod;
+pub use pod::Pod;
+
+// -- Log levels ---------------------------------------------------------------
+
+/// Log level filter for configuring maximum verbosity.
+///
+/// Controls which log messages are processed. Messages at or below the
+/// configured level are logged; more verbose levels are filtered out.
+///
+/// # Examples
+///
+/// ```rust,ignore
+/// use inqjet::{InqJetBuilder, LevelFilter};
+///
+/// let _guard = InqJetBuilder::default()
+///     .with_writer(std::io::stdout())
+///     .with_log_level(LevelFilter::Info)
+///     .build()?;
+/// ```
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum LevelFilter {
+    /// No messages will be logged.
+    Off = 0,
+    /// Only error messages.
+    Error = 1,
+    /// Error and warning messages.
+    Warn = 2,
+    /// Error, warning, and info messages.
+    Info = 3,
+    /// Error, warning, info, and debug messages.
+    Debug = 4,
+    /// All messages including trace.
+    Trace = 5,
+}
+
+impl LevelFilter {
+    pub(crate) fn as_u8(self) -> u8 {
+        self as u8
+    }
+}
+
+#[cfg(feature = "log-compat")]
+impl From<log::LevelFilter> for LevelFilter {
+    fn from(lf: log::LevelFilter) -> Self {
+        match lf {
+            log::LevelFilter::Off => LevelFilter::Off,
+            log::LevelFilter::Error => LevelFilter::Error,
+            log::LevelFilter::Warn => LevelFilter::Warn,
+            log::LevelFilter::Info => LevelFilter::Info,
+            log::LevelFilter::Debug => LevelFilter::Debug,
+            log::LevelFilter::Trace => LevelFilter::Trace,
+        }
+    }
+}
+
+#[cfg(feature = "log-compat")]
+impl From<LevelFilter> for log::LevelFilter {
+    fn from(lf: LevelFilter) -> Self {
+        match lf {
+            LevelFilter::Off => log::LevelFilter::Off,
+            LevelFilter::Error => log::LevelFilter::Error,
+            LevelFilter::Warn => log::LevelFilter::Warn,
+            LevelFilter::Info => log::LevelFilter::Info,
+            LevelFilter::Debug => log::LevelFilter::Debug,
+            LevelFilter::Trace => log::LevelFilter::Trace,
+        }
+    }
+}
+
+// -- Proc macro re-exports ----------------------------------------------------
+
+pub use inqjet_macros::Pod;
+
+#[doc(hidden)]
+pub use inqjet_macros::__hot_log;
 
 // -- Standalone macro support ------------------------------------------------
 
@@ -52,10 +125,41 @@ pub fn __log_enabled(level: u8) -> bool {
     logger::log_enabled(level)
 }
 
-/// Log entry point for standalone macros. Not public API.
+/// Writes the log line prefix (timestamp, level, target:line). Not public API.
+///
+/// Called by proc macro-generated format functions on the consumer thread.
 #[doc(hidden)]
-pub fn __log_impl(level: u8, target: &str, line: u32, args: std::fmt::Arguments<'_>) {
-    logger::log_impl(level, target, line, args)
+pub fn __write_log_prefix(
+    timestamp_ns: u64,
+    level: u8,
+    target: &str,
+    line: u32,
+    out: &mut dyn std::io::Write,
+) {
+    format::write_log_prefix(timestamp_ns, level, target, line, out)
+}
+
+/// Clears the fallback stash. Not public API.
+///
+/// Called by proc macro-generated code at the start of each log block
+/// to reset the TLS stash before new fallback-formatted values are written.
+#[doc(hidden)]
+pub fn __fallback_stash_clear() {
+    pod::fallback_stash_clear()
+}
+
+/// Hot-path log submission. Not public API.
+///
+/// Called by proc macro-generated code to write encoded payloads
+/// to the logbuf with a consumer-side format function.
+#[doc(hidden)]
+pub fn __hot_log_submit(
+    level: u8,
+    payload_size: usize,
+    fmt_fn: fn(u64, u8, &[u8], &mut dyn std::io::Write),
+    encode: impl FnOnce(&mut [u8]),
+) {
+    logger::hot_log_submit(level, payload_size, fmt_fn, encode)
 }
 
 /// Log at the ERROR level.
@@ -73,12 +177,12 @@ pub fn __log_impl(level: u8, target: &str, line: u32, args: std::fmt::Arguments<
 macro_rules! error {
     (target: $target:expr, $($arg:tt)+) => {
         if $crate::__log_enabled(1) {
-            $crate::__log_impl(1, $target, line!(), format_args!($($arg)+))
+            $crate::__hot_log!(1u8, $target, line!(), $($arg)+)
         }
     };
     ($($arg:tt)+) => {
         if $crate::__log_enabled(1) {
-            $crate::__log_impl(1, module_path!(), line!(), format_args!($($arg)+))
+            $crate::__hot_log!(1u8, module_path!(), line!(), $($arg)+)
         }
     };
 }
@@ -97,12 +201,12 @@ macro_rules! error {
 macro_rules! warn {
     (target: $target:expr, $($arg:tt)+) => {
         if $crate::__log_enabled(2) {
-            $crate::__log_impl(2, $target, line!(), format_args!($($arg)+))
+            $crate::__hot_log!(2u8, $target, line!(), $($arg)+)
         }
     };
     ($($arg:tt)+) => {
         if $crate::__log_enabled(2) {
-            $crate::__log_impl(2, module_path!(), line!(), format_args!($($arg)+))
+            $crate::__hot_log!(2u8, module_path!(), line!(), $($arg)+)
         }
     };
 }
@@ -121,12 +225,12 @@ macro_rules! warn {
 macro_rules! info {
     (target: $target:expr, $($arg:tt)+) => {
         if $crate::__log_enabled(3) {
-            $crate::__log_impl(3, $target, line!(), format_args!($($arg)+))
+            $crate::__hot_log!(3u8, $target, line!(), $($arg)+)
         }
     };
     ($($arg:tt)+) => {
         if $crate::__log_enabled(3) {
-            $crate::__log_impl(3, module_path!(), line!(), format_args!($($arg)+))
+            $crate::__hot_log!(3u8, module_path!(), line!(), $($arg)+)
         }
     };
 }
@@ -145,12 +249,12 @@ macro_rules! info {
 macro_rules! debug {
     (target: $target:expr, $($arg:tt)+) => {
         if $crate::__log_enabled(4) {
-            $crate::__log_impl(4, $target, line!(), format_args!($($arg)+))
+            $crate::__hot_log!(4u8, $target, line!(), $($arg)+)
         }
     };
     ($($arg:tt)+) => {
         if $crate::__log_enabled(4) {
-            $crate::__log_impl(4, module_path!(), line!(), format_args!($($arg)+))
+            $crate::__hot_log!(4u8, module_path!(), line!(), $($arg)+)
         }
     };
 }
@@ -169,12 +273,12 @@ macro_rules! debug {
 macro_rules! trace {
     (target: $target:expr, $($arg:tt)+) => {
         if $crate::__log_enabled(5) {
-            $crate::__log_impl(5, $target, line!(), format_args!($($arg)+))
+            $crate::__hot_log!(5u8, $target, line!(), $($arg)+)
         }
     };
     ($($arg:tt)+) => {
         if $crate::__log_enabled(5) {
-            $crate::__log_impl(5, module_path!(), line!(), format_args!($($arg)+))
+            $crate::__hot_log!(5u8, module_path!(), line!(), $($arg)+)
         }
     };
 }
@@ -335,16 +439,20 @@ where
         let _ = LOGGER.set(LoggerState {
             source_producer: producer,
             unparker: unparker.clone(),
+            #[cfg(feature = "log-compat")]
             max_level: level,
             running: running.clone(),
         });
 
-        logger::MAX_LEVEL.store(logger::level_filter_to_u8(level), Ordering::Release);
+        logger::MAX_LEVEL.store(level.as_u8(), Ordering::Release);
 
         // Best-effort: if another logger is already registered the standalone
         // macros still work — they bypass the log facade entirely.
-        let _ = log::set_boxed_logger(Box::new(Logger));
-        log::set_max_level(level);
+        #[cfg(feature = "log-compat")]
+        {
+            let _ = log::set_boxed_logger(Box::new(crate::logger::Logger));
+            log::set_max_level(level.into());
+        }
 
         Ok(InqJetGuard {
             handle: Some(handle),
@@ -363,149 +471,14 @@ fn is_color_enabled(color_mode: ColorMode) -> bool {
             if std::env::var("NO_COLOR").is_ok() {
                 return false;
             }
-            if let Ok(term) = std::env::var("TERM") {
-                if term == "dumb" {
-                    return false;
-                }
+            if let Ok(term) = std::env::var("TERM")
+                && term == "dumb"
+            {
+                return false;
             }
             true
         }
         ColorMode::Always => true,
         ColorMode::Never => false,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::io::BufWriter;
-
-    use hdrhistogram::Histogram;
-    use tracing::Level;
-    use tracing_log::LogTracer;
-    use tracing_subscriber::fmt;
-
-    fn print_histogram_stats(name: &str, hist: &Histogram<u64>) {
-        println!("\n=== {} Performance Profile ===", name);
-        println!("Count: {}", hist.len());
-        println!("Min: {:>8.2}us", hist.min() as f64 / 1000.0);
-        println!("Mean: {:>7.2}us", hist.mean() / 1000.0);
-        println!("Max: {:>8.2}us", hist.max() as f64 / 1000.0);
-        println!("StdDev: {:>5.2}us", hist.stdev() / 1000.0);
-        println!();
-        println!("Percentiles:");
-        println!(
-            "  50th: {:>6.2}us",
-            hist.value_at_quantile(0.50) as f64 / 1000.0
-        );
-        println!(
-            "  90th: {:>6.2}us",
-            hist.value_at_quantile(0.90) as f64 / 1000.0
-        );
-        println!(
-            "  95th: {:>6.2}us",
-            hist.value_at_quantile(0.95) as f64 / 1000.0
-        );
-        println!(
-            "  99th: {:>6.2}us",
-            hist.value_at_quantile(0.99) as f64 / 1000.0
-        );
-        println!(
-            " 99.9th: {:>5.2}us",
-            hist.value_at_quantile(0.999) as f64 / 1000.0
-        );
-        println!(
-            " 99.99th: {:>4.2}us",
-            hist.value_at_quantile(0.9999) as f64 / 1000.0
-        );
-        println!();
-    }
-
-    #[ignore]
-    #[test]
-    fn bench_inqjet() {
-        let tmp = std::env::temp_dir().join("inqjet_bench.log");
-        println!("Writing to {}", tmp.display());
-        let file = std::fs::OpenOptions::new()
-            .truncate(true)
-            .create(true)
-            .write(true)
-            .open(tmp)
-            .expect("Failed to open file");
-        let _guard = InqJetBuilder::default()
-            .with_writer(BufWriter::new(file))
-            .with_log_level(LevelFilter::Info)
-            .with_buffer_size(262_144) // 256KB ring buffer
-            .with_timeout(None)
-            .with_color_mode(ColorMode::Never)
-            .build()
-            .unwrap();
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        let n = 100_000;
-        let mut hist = Histogram::<u64>::new_with_bounds(1, 60 * 1000 * 1000, 3).unwrap();
-
-        println!("Warming up InqJet...");
-        for i in 0..100 {
-            log::info!("warmup message {}", i);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        println!("Starting InqJet benchmark with {} iterations...", n);
-        for i in 0..n {
-            let start = std::time::Instant::now();
-            log::info!("logging to inqjet logger! msg number: {}", i);
-            let elapsed = start.elapsed();
-            hist.record(elapsed.as_nanos() as u64).unwrap();
-
-            if i % 1000 == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-        }
-
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        print_histogram_stats("InqJet", &hist);
-    }
-
-    #[ignore]
-    #[test]
-    fn bench_tracing() {
-        LogTracer::init().unwrap();
-        let builder = tracing_appender::non_blocking::NonBlockingBuilder::default()
-            .buffered_lines_limit(262_144);
-        let (writer, _guard) = builder.finish(io::stdout());
-
-        let subscriber = fmt::Subscriber::builder()
-            .with_writer(writer)
-            .with_max_level(Level::INFO)
-            .finish();
-        tracing::subscriber::set_global_default(subscriber).unwrap();
-
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        let n = 100_000;
-        let mut hist = Histogram::<u64>::new_with_bounds(1, 60 * 1000 * 1000, 3).unwrap();
-
-        println!("Warming up Tracing...");
-        for i in 0..100 {
-            log::info!("warmup message {}", i);
-        }
-        std::thread::sleep(std::time::Duration::from_millis(50));
-
-        println!("Starting Tracing benchmark with {} iterations...", n);
-        for i in 0..n {
-            let start = std::time::Instant::now();
-            log::info!("logging to tracing logger! msg number: {}", i);
-            let elapsed = start.elapsed();
-            hist.record(elapsed.as_nanos() as u64).unwrap();
-
-            if i % 1000 == 0 {
-                std::thread::sleep(std::time::Duration::from_millis(25));
-            }
-        }
-
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        print_histogram_stats("Tracing", &hist);
     }
 }

@@ -78,11 +78,13 @@ pub(crate) fn read_header(buf: &[u8]) -> RecordHeader {
 // bytes 6+target_len..:   message string (UTF-8, from format_args!())
 
 /// Calculates total record size for a standard payload.
+#[cfg(any(feature = "log-compat", test))]
 pub(crate) fn standard_record_size(target_len: usize, message_len: usize) -> usize {
     HEADER_SIZE + 4 + 2 + target_len + message_len
 }
 
 /// Writes the standard payload into `buf`. Returns bytes written.
+#[cfg(any(feature = "log-compat", test))]
 pub(crate) fn write_standard_payload(
     buf: &mut [u8],
     line: u32,
@@ -108,6 +110,7 @@ pub(crate) fn write_standard_payload(
 }
 
 /// Reads the standard payload. Returns (line, target, message).
+#[cfg(any(feature = "log-compat", test))]
 pub(crate) fn read_standard_payload(payload: &[u8]) -> (u32, &str, &str) {
     let line = u32::from_le_bytes(
         payload[0..4]

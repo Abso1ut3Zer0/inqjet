@@ -22,17 +22,20 @@
 //! the entire log path, so any re-entrant call hits the RefCell guard
 //! before reaching the buffer.
 
-use std::cell::{RefCell, UnsafeCell};
+use std::cell::RefCell;
+#[cfg(feature = "log-compat")]
+use std::cell::UnsafeCell;
+#[cfg(feature = "log-compat")]
 use std::fmt::Write;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use crossbeam_utils::sync::Unparker;
-use log::LevelFilter;
 use nexus_logbuf::queue::mpsc;
 
+#[cfg(feature = "log-compat")]
 use crate::format;
-use crate::record::{self, RecordHeader, HEADER_SIZE};
+use crate::record::{self, HEADER_SIZE, RecordHeader};
 
 pub(crate) struct LoggerState {
     /// Source producer — threads clone from this.
@@ -41,8 +44,9 @@ pub(crate) struct LoggerState {
     /// Unparker for waking the archiver thread.
     pub unparker: Unparker,
 
-    /// Global level filter.
-    pub max_level: LevelFilter,
+    /// Global level filter (used by the `log` crate bridge).
+    #[cfg(feature = "log-compat")]
+    pub max_level: crate::LevelFilter,
 
     /// Shutdown flag. Arc-shared with guard and archiver.
     pub running: Arc<AtomicBool>,
@@ -58,17 +62,6 @@ pub(crate) fn log_enabled(level: u8) -> bool {
     level <= MAX_LEVEL.load(Ordering::Relaxed)
 }
 
-pub(crate) fn level_filter_to_u8(lf: LevelFilter) -> u8 {
-    match lf {
-        LevelFilter::Off => 0,
-        LevelFilter::Error => 1,
-        LevelFilter::Warn => 2,
-        LevelFilter::Info => 3,
-        LevelFilter::Debug => 4,
-        LevelFilter::Trace => 5,
-    }
-}
-
 thread_local! {
     /// Thread-local producer clone. RefCell provides re-entrancy detection:
     /// if a Display/Debug impl calls log!() during formatting, try_borrow_mut()
@@ -81,16 +74,18 @@ thread_local! {
     /// including TLS_BUF access below.
     static TLS_PRODUCER: RefCell<Option<mpsc::Producer>> = const { RefCell::new(None) };
 
-    /// Thread-local formatting buffer. UnsafeCell because re-entrancy is
-    /// guarded by TLS_PRODUCER's RefCell above.
+    /// Thread-local formatting buffer for the `log` crate bridge path.
+    /// UnsafeCell because re-entrancy is guarded by TLS_PRODUCER's RefCell above.
     ///
     /// # Safety
     ///
     /// Only accessed while TLS_PRODUCER is mutably borrowed. The RefCell
     /// borrow on TLS_PRODUCER prevents re-entrant access to this buffer.
+    #[cfg(feature = "log-compat")]
     static TLS_BUF: UnsafeCell<String> = const { UnsafeCell::new(String::new()) };
 }
 
+#[cfg(feature = "log-compat")]
 fn level_to_u8(level: log::Level) -> u8 {
     match level {
         log::Level::Error => 1,
@@ -101,11 +96,11 @@ fn level_to_u8(level: log::Level) -> u8 {
     }
 }
 
-/// Core log path shared by `Logger::log()` and standalone macros.
+/// Core log path for the `log` crate bridge (`Logger::log()`).
 ///
 /// Level gating is the caller's responsibility — `Logger::log()` checks
-/// against `state.max_level`, standalone macros check `MAX_LEVEL` in the
-/// macro body before `format_args!()` evaluates.
+/// against `state.max_level`.
+#[cfg(feature = "log-compat")]
 pub(crate) fn log_impl(level: u8, target: &str, line: u32, args: std::fmt::Arguments<'_>) {
     let state = match LOGGER.get() {
         Some(s) => s,
@@ -154,10 +149,10 @@ pub(crate) fn log_impl(level: u8, target: &str, line: u32, args: std::fmt::Argum
                             buf.as_str(),
                         );
                         claim.commit();
-                        state.unparker.unpark();
                         break;
                     }
                     Err(nexus_logbuf::TryClaimError::Full) => {
+                        // Backpressure: consumer must drain before we can proceed.
                         state.unparker.unpark();
                         std::hint::spin_loop();
                     }
@@ -170,14 +165,73 @@ pub(crate) fn log_impl(level: u8, target: &str, line: u32, args: std::fmt::Argum
     });
 }
 
+/// Hot-path submit: writes raw encoded payload to the logbuf.
+///
+/// Unlike `log_impl` which formats text via `format_args!()`, this
+/// receives pre-encoded bytes and a function pointer for consumer-side
+/// formatting. The encode closure writes argument bytes directly into
+/// the claimed region — no `TLS_BUF` needed.
+pub(crate) fn hot_log_submit(
+    level: u8,
+    payload_size: usize,
+    fmt_fn: crate::record::FormatFn,
+    encode: impl FnOnce(&mut [u8]),
+) {
+    let state = match LOGGER.get() {
+        Some(s) => s,
+        None => return,
+    };
+    if !state.running.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let timestamp_ns = crate::format::snap_timestamp();
+    let total_size = HEADER_SIZE + payload_size;
+
+    let header = RecordHeader {
+        timestamp_ns,
+        formatter: fmt_fn,
+        level,
+        _pad: [0u8; 7],
+    };
+
+    TLS_PRODUCER.with(|producer_cell| {
+        let mut producer_opt = producer_cell
+            .try_borrow_mut()
+            .expect("re-entrant logging detected: Display/Debug impls must not call log macros");
+        let producer = producer_opt.get_or_insert_with(|| state.source_producer.clone());
+
+        loop {
+            match producer.try_claim(total_size) {
+                Ok(mut claim) => {
+                    record::write_header(&mut claim, &header);
+                    encode(&mut claim[HEADER_SIZE..]);
+                    claim.commit();
+                    break;
+                }
+                Err(nexus_logbuf::TryClaimError::Full) => {
+                    // Backpressure: consumer must drain before we can proceed.
+                    state.unparker.unpark();
+                    std::hint::spin_loop();
+                }
+                Err(nexus_logbuf::TryClaimError::ZeroLength) => {
+                    unreachable!("record size is always > 0");
+                }
+            }
+        }
+    });
+}
+
 /// Logger that implements `log::Log` by writing records to the logbuf.
+#[cfg(feature = "log-compat")]
 pub(crate) struct Logger;
 
+#[cfg(feature = "log-compat")]
 impl log::Log for Logger {
     fn enabled(&self, metadata: &log::Metadata) -> bool {
         LOGGER
             .get()
-            .map(|s| metadata.level() <= s.max_level)
+            .map(|s| level_to_u8(metadata.level()) <= s.max_level.as_u8())
             .unwrap_or(false)
     }
 
@@ -187,7 +241,7 @@ impl log::Log for Logger {
             None => return,
         };
 
-        if record.level() > state.max_level {
+        if level_to_u8(record.level()) > state.max_level.as_u8() {
             return;
         }
 
