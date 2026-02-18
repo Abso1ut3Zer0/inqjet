@@ -2,6 +2,7 @@
 name = "inqjet"
 version = "1.0.0"
 edition = "2024"
+rust-version = "1.85"
 authors = ["Abso1ut3Zer0"]
 description = "Ultra-fast, low-latency logging for Rust applications"
 documentation = "https://docs.rs/inqjet"
@@ -19,7 +20,7 @@ log-compat = ["dep:log"]
 [dependencies]
 crossbeam-utils = "0.8.21"
 log = { version = "0.4.27", features = ["std"], optional = true }
-inqjet-macros = { path = "../inqjet-macros" }
+inqjet-macros = { path = "../inqjet-macros", version = "1.0.0" }
 nexus-logbuf = "1.0.1"
 thiserror = "2.0.12"
 
