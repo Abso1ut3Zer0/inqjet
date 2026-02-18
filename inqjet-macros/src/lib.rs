@@ -251,10 +251,12 @@ fn generate(input: &HotLogInput) -> TokenStream2 {
     // Witness function + formatter
     let witness_block = if n == 0 {
         quote! {
-            fn __make_fmt() -> fn(u64, u8, &[u8], &mut dyn ::std::io::Write) {
-                fn __fmt(
-                    _ts: u64, _level: u8, __payload: &[u8], out: &mut dyn ::std::io::Write,
-                ) {
+            fn __make_fmt() -> for<'__a> fn(::inqjet::__private::FormatContext<'__a>) {
+                fn __fmt(__ctx: ::inqjet::__private::FormatContext<'_>) {
+                    let _ts = __ctx.timestamp_ns;
+                    let _level = __ctx.level;
+                    let __payload = __ctx.payload;
+                    let out = __ctx.out;
                     #prefix_decode
                     ::inqjet::__private::write_log_prefix(_ts, _level, __target, __line, out);
                     writeln!(out, #fmt_str).ok();
@@ -267,14 +269,18 @@ fn generate(input: &HotLogInput) -> TokenStream2 {
         quote! {
             fn __make_fmt<#(#tp: ::inqjet::__private::HotDecode),*>(
                 #(_: ::inqjet::__private::Witness<#tp>),*
-            ) -> fn(u64, u8, &[u8], &mut dyn ::std::io::Write)
+            ) -> for<'__a> fn(::inqjet::__private::FormatContext<'__a>)
             #where_clause
             {
                 fn __fmt<#(#tp: ::inqjet::__private::HotDecode),*>(
-                    _ts: u64, _level: u8, __payload: &[u8], out: &mut dyn ::std::io::Write,
+                    __ctx: ::inqjet::__private::FormatContext<'_>,
                 )
                 #where_clause2
                 {
+                    let _ts = __ctx.timestamp_ns;
+                    let _level = __ctx.level;
+                    let __payload = __ctx.payload;
+                    let out = __ctx.out;
                     #prefix_decode
                     let mut __off = 6usize + __tl;
                     #(

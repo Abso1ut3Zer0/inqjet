@@ -9,7 +9,7 @@ use std::time::Duration;
 use crossbeam_utils::sync::Parker;
 use nexus_logbuf::queue::mpsc;
 
-use crate::record;
+use crate::record::{self, FormatContext};
 
 /// A logbuf consumer paired with its output writer.
 pub(crate) struct Stream {
@@ -38,9 +38,13 @@ pub(crate) fn archiver_loop(
 
         while let Some(claim) = stream.consumer.try_claim() {
             let header = record::read_header(&claim);
-            let payload = &claim[record::HEADER_SIZE..];
             buf.clear();
-            (header.formatter)(header.timestamp_ns, header.level, payload, &mut buf);
+            (header.formatter)(FormatContext {
+                timestamp_ns: header.timestamp_ns,
+                level: header.level,
+                payload: &claim[record::HEADER_SIZE..],
+                out: &mut buf,
+            });
             let _ = stream.writer.write_all(&buf);
             had_work = true;
             // ReadClaim dropped here -> region zeroed, head advanced
@@ -64,9 +68,13 @@ pub(crate) fn archiver_loop(
     // add atomic ops to every producer claim on the hot path.
     while let Some(claim) = stream.consumer.try_claim() {
         let header = record::read_header(&claim);
-        let payload = &claim[record::HEADER_SIZE..];
         buf.clear();
-        (header.formatter)(header.timestamp_ns, header.level, payload, &mut buf);
+        (header.formatter)(FormatContext {
+            timestamp_ns: header.timestamp_ns,
+            level: header.level,
+            payload: &claim[record::HEADER_SIZE..],
+            out: &mut buf,
+        });
         let _ = stream.writer.write_all(&buf);
     }
     let _ = stream.writer.flush();

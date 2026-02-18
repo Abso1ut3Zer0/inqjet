@@ -10,8 +10,19 @@ use std::io;
 pub(crate) const HEADER_SIZE: usize = std::mem::size_of::<RecordHeader>();
 const _: () = assert!(HEADER_SIZE == 24);
 
+/// Context passed to format functions on the consumer thread.
+///
+/// Named fields instead of positional args — makes call sites and
+/// generated formatter functions self-documenting.
+pub struct FormatContext<'a> {
+    pub timestamp_ns: u64,
+    pub level: u8,
+    pub payload: &'a [u8],
+    pub out: &'a mut dyn io::Write,
+}
+
 /// Called by the consumer to format a record's payload into output.
-pub(crate) type FormatFn = fn(u64, u8, &[u8], &mut dyn io::Write);
+pub(crate) type FormatFn = for<'a> fn(FormatContext<'a>);
 
 /// Fixed 24-byte header prepended to every record in the ring buffer.
 ///
@@ -131,7 +142,7 @@ pub(crate) fn read_standard_payload(payload: &[u8]) -> (u32, &str, &str) {
 mod tests {
     use super::*;
 
-    fn dummy_format_fn(_: u64, _: u8, _: &[u8], _: &mut dyn io::Write) {}
+    fn dummy_format_fn(_: FormatContext<'_>) {}
 
     #[test]
     fn header_size_is_24() {

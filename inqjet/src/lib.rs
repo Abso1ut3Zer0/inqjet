@@ -126,6 +126,7 @@ pub use inqjet_macros::__hot_log;
 #[doc(hidden)]
 pub mod __private {
     pub use crate::pod::{HotArg, HotDecode, HotEncode, PreFormatted, PreFormattedValue, Witness};
+    pub use crate::record::FormatContext;
 
     #[inline]
     pub fn log_enabled(level: u8) -> bool {
@@ -149,7 +150,7 @@ pub mod __private {
     pub fn hot_log_submit(
         level: u8,
         payload_size: usize,
-        fmt_fn: fn(u64, u8, &[u8], &mut dyn std::io::Write),
+        fmt_fn: for<'a> fn(crate::record::FormatContext<'a>),
         encode: impl FnOnce(&mut [u8]),
     ) {
         crate::logger::hot_log_submit(level, payload_size, fmt_fn, encode)

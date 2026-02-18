@@ -105,14 +105,9 @@ fn civil_from_days(days: i32) -> (i32, u32, u32) {
 /// 2024-01-15T14:30:45.123456789Z [INFO] my_app::module:42 message text
 /// ```
 #[cfg(feature = "log-compat")]
-pub(crate) fn standard_format_fn(
-    timestamp_ns: u64,
-    level: u8,
-    payload: &[u8],
-    out: &mut dyn Write,
-) {
+pub(crate) fn standard_format_fn(ctx: crate::record::FormatContext<'_>) {
     let colored = COLOR_ENABLED.load(Ordering::Relaxed);
-    format_record(timestamp_ns, level, payload, out, colored);
+    format_record(ctx.timestamp_ns, ctx.level, ctx.payload, ctx.out, colored);
 }
 
 /// Writes the log line prefix: `timestamp [LEVEL] target:line `.
