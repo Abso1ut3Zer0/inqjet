@@ -1,6 +1,6 @@
 [package]
 name = "inqjet"
-version = "1.1.0"
+version = "1.1.1"
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
@@ -21,7 +21,7 @@ log-compat = ["dep:log"]
 crossbeam-utils = "0.8.21"
 log = { version = "0.4.27", features = ["std"], optional = true }
 inqjet-macros = { path = "../inqjet-macros", version = "1.0.0" }
-nexus-logbuf = "1.0.1"
+nexus-logbuf = "1.0.2"
 thiserror = "2.0.12"
 
 [dev-dependencies]
