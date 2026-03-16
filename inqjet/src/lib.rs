@@ -550,7 +550,7 @@ where
         });
 
         let _ = LOGGER.set(LoggerState {
-            source_producer: logger::SyncProducer(producer),
+            source_producer: logger::SyncProducer::new(producer),
             unparker: unparker.clone(),
             backpressure: self.backpressure,
             running: running.clone(),

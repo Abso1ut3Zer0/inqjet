@@ -54,10 +54,25 @@ use crate::record::{self, HEADER_SIZE, RecordHeader};
 /// (always 0, never mutated after construction) and clones the inner
 /// `Arc`. `OnceLock::set` provides the happens-before relationship
 /// between the initial write and all subsequent reads.
-pub(crate) struct SyncProducer(pub(crate) mpsc::Producer);
+pub(crate) struct SyncProducer(mpsc::Producer);
+
+impl SyncProducer {
+    pub(crate) fn new(producer: mpsc::Producer) -> Self {
+        Self(producer)
+    }
+
+    /// Clone a thread-local producer from the source.
+    ///
+    /// This is the only operation permitted on the global producer.
+    pub(crate) fn clone_producer(&self) -> mpsc::Producer {
+        self.0.clone()
+    }
+}
 
 // SAFETY: See `SyncProducer` doc comment. The inner Producer is
-// immutable after placement in OnceLock. Only `.clone()` is called.
+// immutable after placement in OnceLock. Only `clone_producer()` is
+// called, which reads cached_head (always 0) and clones the Arc.
+// The private field prevents any other access to the inner Producer.
 unsafe impl Sync for SyncProducer {}
 
 pub(crate) struct LoggerState {
@@ -140,7 +155,7 @@ pub(crate) fn log_impl(level: u8, target: &str, line: u32, args: std::fmt::Argum
             .try_borrow_mut()
             .expect("re-entrant logging detected: Display/Debug impls must not call log macros");
 
-        let producer = producer_opt.get_or_insert_with(|| state.source_producer.0.clone());
+        let producer = producer_opt.get_or_insert_with(|| state.source_producer.clone_producer());
 
         TLS_BUF.with(|buf_cell| {
             // SAFETY: TLS is single-threaded. Re-entrancy is guarded by
@@ -227,7 +242,7 @@ pub(crate) fn hot_log_submit(
         let mut producer_opt = producer_cell
             .try_borrow_mut()
             .expect("re-entrant logging detected: Display/Debug impls must not call log macros");
-        let producer = producer_opt.get_or_insert_with(|| state.source_producer.0.clone());
+        let producer = producer_opt.get_or_insert_with(|| state.source_producer.clone_producer());
 
         let backoff = Backoff::new();
         loop {
