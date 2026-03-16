@@ -69,7 +69,7 @@ pub trait ArchiveTag: Copy + 'static {
 ///
 /// // On the hot path:
 /// handle.write(
-///     &VenueEvent { venue: "BINANCE", direction: Direction::Inbound },
+///     VenueEvent { venue: "BINANCE", direction: Direction::Inbound },
 ///     b"8=FIX.4.4|35=D|...",
 /// );
 /// ```

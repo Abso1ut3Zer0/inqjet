@@ -494,7 +494,7 @@ where
     /// let mut archive = builder.add_archive::<VenueEvent>(file, 65536);
     /// let _guard = builder.build()?;
     ///
-    /// archive.write(&VenueEvent { venue: "BINANCE", direction: Direction::Inbound }, b"data");
+    /// archive.write(VenueEvent { venue: "BINANCE", direction: Direction::Inbound }, b"data");
     /// ```
     pub fn add_archive<T: ArchiveTag>(
         &mut self,
@@ -550,7 +550,7 @@ where
         });
 
         let _ = LOGGER.set(LoggerState {
-            source_producer: producer,
+            source_producer: logger::SyncProducer::new(producer),
             unparker: unparker.clone(),
             backpressure: self.backpressure,
             running: running.clone(),
