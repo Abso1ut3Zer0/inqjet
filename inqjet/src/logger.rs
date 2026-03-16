@@ -38,9 +38,31 @@ use nexus_logbuf::queue::mpsc;
 use crate::format;
 use crate::record::{self, HEADER_SIZE, RecordHeader};
 
+/// `Sync` wrapper for the source `Producer` stored in global state.
+///
+/// `Producer` is `!Sync` because it contains `Cell<usize>` for cached
+/// ring buffer indices. However, the source producer stored in `LOGGER`
+/// is never used for writing — it exists solely as a clonable template.
+/// Each thread clones from it exactly once during TLS init to get its
+/// own thread-local producer.
+///
+/// # Safety
+///
+/// We uphold `Sync` by never calling `try_claim()` or any mutating
+/// method on the global producer. The only operation performed on it
+/// after `OnceLock::set()` is `.clone()`, which reads `cached_head`
+/// (always 0, never mutated after construction) and clones the inner
+/// `Arc`. `OnceLock::set` provides the happens-before relationship
+/// between the initial write and all subsequent reads.
+pub(crate) struct SyncProducer(pub(crate) mpsc::Producer);
+
+// SAFETY: See `SyncProducer` doc comment. The inner Producer is
+// immutable after placement in OnceLock. Only `.clone()` is called.
+unsafe impl Sync for SyncProducer {}
+
 pub(crate) struct LoggerState {
-    /// Source producer — threads clone from this.
-    pub source_producer: mpsc::Producer,
+    /// Source producer — threads clone from this, never call try_claim().
+    pub source_producer: SyncProducer,
 
     /// Unparker for waking the archiver thread.
     pub unparker: Unparker,
@@ -118,7 +140,7 @@ pub(crate) fn log_impl(level: u8, target: &str, line: u32, args: std::fmt::Argum
             .try_borrow_mut()
             .expect("re-entrant logging detected: Display/Debug impls must not call log macros");
 
-        let producer = producer_opt.get_or_insert_with(|| state.source_producer.clone());
+        let producer = producer_opt.get_or_insert_with(|| state.source_producer.0.clone());
 
         TLS_BUF.with(|buf_cell| {
             // SAFETY: TLS is single-threaded. Re-entrancy is guarded by
@@ -205,7 +227,7 @@ pub(crate) fn hot_log_submit(
         let mut producer_opt = producer_cell
             .try_borrow_mut()
             .expect("re-entrant logging detected: Display/Debug impls must not call log macros");
-        let producer = producer_opt.get_or_insert_with(|| state.source_producer.clone());
+        let producer = producer_opt.get_or_insert_with(|| state.source_producer.0.clone());
 
         let backoff = Backoff::new();
         loop {
