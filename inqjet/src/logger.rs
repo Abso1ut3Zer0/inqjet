@@ -189,7 +189,7 @@ pub(crate) fn log_impl(level: u8, target: &str, line: u32, args: std::fmt::Argum
                         claim.commit();
                         break;
                     }
-                    Err(nexus_logbuf::TryClaimError::Full) => match state.backpressure {
+                    Err(nexus_logbuf::BufferFull) => match state.backpressure {
                         crate::BackpressureMode::Drop => return,
                         crate::BackpressureMode::Backoff => {
                             if !state.running.load(Ordering::Relaxed) {
@@ -199,9 +199,6 @@ pub(crate) fn log_impl(level: u8, target: &str, line: u32, args: std::fmt::Argum
                             backoff.snooze();
                         }
                     },
-                    Err(nexus_logbuf::TryClaimError::ZeroLength) => {
-                        unreachable!("record size is always > 0");
-                    }
                 }
             }
         });
@@ -253,7 +250,7 @@ pub(crate) fn hot_log_submit(
                     claim.commit();
                     break;
                 }
-                Err(nexus_logbuf::TryClaimError::Full) => match state.backpressure {
+                Err(nexus_logbuf::BufferFull) => match state.backpressure {
                     crate::BackpressureMode::Drop => return,
                     crate::BackpressureMode::Backoff => {
                         if !state.running.load(Ordering::Relaxed) {
@@ -263,9 +260,6 @@ pub(crate) fn hot_log_submit(
                         backoff.snooze();
                     }
                 },
-                Err(nexus_logbuf::TryClaimError::ZeroLength) => {
-                    unreachable!("record size is always > 0");
-                }
             }
         }
     });
